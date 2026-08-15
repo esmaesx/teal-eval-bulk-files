@@ -110,13 +110,16 @@ function validateCommandMessage(message, sender) {
   const senderIssue = senderIssueIdentifier(sender);
   if (!senderIssue) return "The command did not come from the top frame of an allowed issue page.";
   if (!message || typeof message !== "object" || message.type !== COMMAND_REQUEST_MESSAGE) return "The command was invalid.";
-  const allowedKeys = new Set(["type", "command", "issueIdentifier", "names"]);
+  const allowedKeys = new Set(["type", "command", "issueIdentifier", "names", "authorizationId"]);
   if (!Object.keys(message).every((key) => allowedKeys.has(key))) return "The command contained an unsupported field.";
   if (!ALLOWED_COMMANDS.has(message.command)) return "The command was not allowed.";
   if (message.issueIdentifier !== senderIssue) return "The command issue identifier did not match this page.";
   const needsNames = ["plan-upload", "apply-upload", "plan-delete", "apply-delete"].includes(message.command);
+  const needsAuthorization = ["apply-upload", "apply-delete"].includes(message.command);
   if (!needsNames && Object.prototype.hasOwnProperty.call(message, "names")) return "This command cannot include names.";
   if (needsNames && (!Array.isArray(message.names) || message.names.length === 0 || message.names.length > 500 || !message.names.every(validateFilename))) return "The command names were invalid.";
+  if (needsAuthorization && !TOKEN_PATTERN.test(message.authorizationId || "")) return "The CLI plan authorization was invalid.";
+  if (!needsAuthorization && Object.prototype.hasOwnProperty.call(message, "authorizationId")) return "This command cannot include a CLI plan authorization.";
   return "";
 }
 
@@ -250,6 +253,7 @@ async function routeCommand(message, sender) {
   try {
     const execution = { type: COMMAND_EXECUTE_MESSAGE, command: message.command, issueIdentifier: message.issueIdentifier };
     if (Object.prototype.hasOwnProperty.call(message, "names")) execution.names = [...message.names];
+    if (Object.prototype.hasOwnProperty.call(message, "authorizationId")) execution.authorizationId = message.authorizationId;
     const result = await chrome.tabs.sendMessage(sender.tab.id, execution, { frameId: 0 });
     return result && typeof result === "object" ? result : { ok: false, error: "The isolated controller returned no result." };
   } catch (error) {

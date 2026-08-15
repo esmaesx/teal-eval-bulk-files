@@ -7,7 +7,7 @@ This repository contains:
 - a Codex skill that selects a browser session and calls the CLI safely;
 - local tests and a false `TAB-TEST` eval page.
 
-The current release is `0.9.1`.
+The current release is `0.9.2`.
 
 ## Install the extension
 
@@ -46,9 +46,12 @@ The CLI fails if the selected browser has no exact matching issue tab or has mor
 
 - The production extension runs only on `https://platform-teal-alpha.vercel.app/issue/*`.
 - The CLI accepts only loopback debugging connections.
+- Local CDP access is a trusted local mutation authority. The plan layers prevent stale, mismatched, or repeated CLI applies; they are not a defense against a hostile local process that already controls that CDP session.
 - Current-session mode reads only the browser's small `DevToolsActivePort` record. It does not read cookies, credentials, history, or profile databases.
 - Upload and delete use one-use plan tokens bound to the issue, target tab, requested names, and staged inventory.
-- The CLI cannot approve a mutation. A trusted user click on the extension's closed confirmation dialog is still required.
+- The extension also issues a short-lived, one-use authorization ID. The CLI keeps it inside the local token record and never prints it.
+- Human interface actions use the extension's trusted Confirm/Cancel dialog.
+- CLI actions use the user's exact request plus a one-use plan token and an exact inventory recheck. They do not open or need a visual confirmation dialog.
 - Duplicate upload names are skipped independently. Other files continue.
 - Bulk deletion has a five-second stop window and continues only while the exact staged row can be proved.
 

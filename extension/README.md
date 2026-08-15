@@ -21,9 +21,9 @@ The dialog uses the Teal eval page's dark theme variables for its background, te
 
 ## Important upload behavior
 
-The Teal platform posts one Linear comment when it finalizes each staged file. The extension shows this warning and requires an explicit confirmation before it begins an upload batch.
+The Teal platform posts one Linear comment when it finalizes each staged file. The human interface shows this warning and requires an explicit confirmation before it begins an upload batch.
 
-The extension does not upload, delete, or post anything by itself. Before a batch starts, its closed-shadow in-extension alert dialog shows the exact selected names. Only a trusted click on **Confirm** starts the batch. A scripted click, including a CLI CDP command, cannot approve it.
+The extension does not upload, delete, or post anything by itself. For a batch started in the human interface, its closed-shadow in-extension alert dialog shows the exact selected names. Only a trusted click on **Confirm** starts that human-interface batch. The CLI does not script this button. It uses its separate one-use plan-token path.
 
 ## Install in Chrome or Microsoft Edge
 
@@ -94,11 +94,13 @@ The explicit endpoint mode remains available. A separate Edge debug profile can 
 & "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --user-data-dir="$env:LOCALAPPDATA\TealBulkCliProfile"
 ```
 
-The CLI never confirms a mutation. After `apply-upload` or `apply-delete`, review the exact list in the extension and select **Confirm** there. Select **Cancel** to keep the page unchanged.
+The CLI does not open or click a visual confirmation. After the user requests an exact upload or deletion, `plan-*` returns the actionable names and a one-use token. `apply-*` uses that token to start the matching plan without an OK or Confirm click.
 
 The CLI only accepts an already open allowed issue target. It uses the browser debugging protocol only to select that exact target, set paths on the extension's file input, and call the narrow isolated bridge commands: `status`, `list`, `plan-upload`, `apply-upload`, `plan-delete`, `apply-delete`, and `stop`. It cannot send JavaScript, selectors, URLs, fetch requests, or arbitrary browser methods through that bridge.
 
-Each `plan-*` command writes a random, one-use token in the local temporary state file. The token expires after five minutes by default. It is bound to the issue ID, target tab ID, operation, exact requested names, and a sorted staged-file inventory. `apply-*` rechecks that inventory before it consumes the token and asks for the in-extension trusted confirmation. The JSON result reports `succeeded`, `skipped`, `failed`, and `remaining`; it never retries a mutation automatically.
+Treat local CDP access as a trusted local mutation authority. The one-use plan layers prevent accidental, stale, mismatched, and repeated CLI applies. They do not protect against a hostile local process that already controls the same CDP session, because that process can create and apply its own plan.
+
+Each `plan-*` command writes a random, one-use token in the local temporary state file. The extension also returns a short-lived, one-use authorization ID that the CLI keeps only inside that token record and does not print. The plan is bound to the issue ID, target tab ID, operation, exact requested names, original planned upload `File` objects or delete rows, and a sorted staged-file inventory. `apply-*` rechecks that inventory, consumes both authorization layers, and starts the batch without a visual confirmation. The JSON result reports `succeeded`, `skipped`, `failed`, and `remaining`; it never retries a mutation automatically.
 
 For local-only verification, `work/generate-teal-test-manifest.mjs` can create a manifest with the exact `http://127.0.0.1:8769/issue/*` match and exact loopback host permission. It changes only the generated manifest. The extension source files are unchanged. Do not package that generated manifest.
 

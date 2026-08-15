@@ -11,6 +11,8 @@
 
 The CLI attaches only to an already open issue target. It accepts either an explicit loopback Chrome DevTools Protocol endpoint or a user-selected current Chrome or Edge session with a valid protected `DevToolsActivePort` record. It does not launch browsers, choose profiles, open tabs, or navigate.
 
+Treat local CDP access as a trusted local mutation authority. The one-use local token and extension authorization ID prevent stale, mismatched, or repeated applies within the CLI workflow. They are not a defense against a hostile local process that already controls the same CDP session, because that process can create and apply its own plan.
+
 Explicit loopback endpoints support Microsoft Edge, Google Chrome, Brave, and Chromium. Current-session mode supports Google Chrome and Microsoft Edge. The user must enable remote debugging at the browser's `inspect/#remote-debugging` page and approve the local connection. A signed-in tab or extension permission alone is not a CLI transport.
 
 When the user names a logged-in profile or session:
@@ -31,12 +33,12 @@ All commands require `--issue` plus exactly one connection choice: `--cdp` or `-
 - `status`: Return extension readiness and active operation.
 - `list`: Return the sorted staged-file inventory.
 - `plan-upload <absolute paths...>`: Put file handles in the extension input, classify duplicates, and return a one-use token.
-- `apply-upload <token>`: Recheck inventory and wait for the extension confirmation.
+- `apply-upload <token>`: Recheck inventory, consume the one-use plan token, and start the approved upload without a visual confirmation.
 - `plan-delete <filenames...>`: Classify exact staged names, missing names, and ambiguous rows; return a one-use token.
-- `apply-delete <token>`: Recheck inventory and wait for the extension confirmation.
+- `apply-delete <token>`: Recheck inventory, consume the one-use plan token, and start the approved deletion without a visual confirmation.
 - `stop`: Request stop after the current upload or during/between deletions.
 
-The plan token expires after five minutes by default. It is bound to the issue, target tab, operation, requested names, and exact staged inventory. It is consumed before apply calls the extension. Do not reuse it.
+The plan token expires after five minutes by default. It is bound to the issue, target tab, operation, requested names, and exact staged inventory. The extension also issues a short-lived, one-use authorization ID that the CLI stores only inside the local token record. `apply-*` consumes both layers before mutation. Do not reuse them.
 
 ## Output
 
@@ -58,7 +60,7 @@ Duplicate upload names and already staged names are skipped. Missing delete name
 
 ## Approval boundary
 
-`apply-upload` and `apply-delete` open a closed-shadow extension alert dialog with the exact actionable names. Only a trusted user action on **Confirm** can release the batch. The CLI has no approval command. Do not send browser input to bypass this boundary.
+The human extension interface still opens its closed-shadow Confirm/Cancel dialog. The CLI path does not open that dialog. For the CLI, the user's exact request plus the matching one-use local token and extension authorization ID is the approval boundary. `apply-upload` or `apply-delete` rechecks the issue, target tab, requested names, exact planned file objects or rows, and exact staged inventory before it consumes both layers and starts the batch. Do not ask for a second confirmation and do not use browser automation to click a confirmation control.
 
 ## Current-session connection
 

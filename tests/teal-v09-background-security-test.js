@@ -97,6 +97,17 @@ function send(message, from) {
   const rejectedPayload = await send({ ...command, selector: "button" }, valid);
   assert.equal(rejectedPayload.ok, false);
 
+  const directApply = await send({ ...command, command: "apply-delete", names: ["file.txt"] }, valid);
+  assert.equal(directApply.ok, false);
+  const authorizedApply = await send({
+    ...command,
+    command: "apply-delete",
+    names: ["file.txt"],
+    authorizationId: "11111111-1111-4111-8111-111111111111"
+  }, valid);
+  assert.equal(authorizedApply.ok, true);
+  assert.equal(routed.at(-1).authorizationId, "11111111-1111-4111-8111-111111111111");
+
   manifest = { content_scripts: [{ matches: ["<all_urls>", "https://*.example.test/issue/*", "https://platform-teal-alpha.vercel.app/not-issue/*"] }] };
   const wildcardRejected = await send(command, valid);
   assert.equal(wildcardRejected.ok, false);

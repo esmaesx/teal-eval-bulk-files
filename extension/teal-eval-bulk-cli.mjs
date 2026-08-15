@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 
 const BRIDGE_GLOBAL = "__TEAL_EVAL_BULK_V09_BRIDGE__";
 const ISSUE_PATTERN = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/;
+const BRIDGE_AUTHORIZATION_PATTERN = /^[A-Za-z0-9-]{16,80}$/;
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 const EXIT_USAGE = 2;
 const EXIT_CONNECTION = 3;
@@ -319,12 +320,25 @@ function validatePlanToken(record, { issueIdentifier, operation, targetId, now =
   if (record.targetId !== targetId) throw new Error("The plan token is bound to a different target tab.");
 }
 
+function createApplyBridgeCommand(command, record) {
+  if (!["apply-upload", "apply-delete"].includes(command)) throw new Error("The apply command was invalid.");
+  if (!record || !Array.isArray(record.requestedNames) || !record.requestedNames.length) throw new Error("The saved plan file list was invalid.");
+  if (!BRIDGE_AUTHORIZATION_PATTERN.test(record.bridgeAuthorizationId || "")) throw new Error("The saved CLI plan authorization was invalid.");
+  return {
+    command,
+    names: [...record.requestedNames],
+    authorizationId: record.bridgeAuthorizationId
+  };
+}
+
 async function createPlan(cli, client, contextId) {
   const operation = cli.command === "plan-upload" ? "upload" : "delete";
   const names = operation === "upload" ? await setUploadFiles(client, cli.operands) : cli.operands;
   if (!names.length) throw new Error(`${cli.command} requires at least one ${operation === "upload" ? "file path" : "filename"}.`);
   const result = await callBridge(client, contextId, { command: cli.command, names });
   if (!result?.ok) throw new Error(result?.error || "The controller could not create a plan.");
+  if (!BRIDGE_AUTHORIZATION_PATTERN.test(result.authorizationId || "")) throw new Error("The controller returned no valid CLI plan authorization.");
+  const { authorizationId, ...publicResult } = result;
   const inventory = canonicalInventory(result.inventory);
   const state = await loadState(cli.statePath);
   const now = Date.now();
@@ -335,13 +349,14 @@ async function createPlan(cli, client, contextId) {
     targetId: client.targetId,
     targetUrl: client.targetUrl,
     requestedNames: [...names],
+    bridgeAuthorizationId: authorizationId,
     inventory,
     issuedAt: now,
     expiresAt: now + cli.ttlMs,
     consumed: false
   });
   await saveState(cli.statePath, state);
-  return { ...result, inventory, token, expiresAt: state.tokens[token].expiresAt };
+  return { ...publicResult, inventory, token, expiresAt: state.tokens[token].expiresAt };
 }
 
 async function applyPlan(cli, client, contextId) {
@@ -358,7 +373,7 @@ async function applyPlan(cli, client, contextId) {
   record.consumed = true;
   record.consumedAt = now;
   await saveState(cli.statePath, state);
-  const result = await callBridge(client, contextId, { command: cli.command, names: record.requestedNames });
+  const result = await callBridge(client, contextId, createApplyBridgeCommand(cli.command, record));
   if (!result?.ok) throw new Error(result?.error || "The controller rejected the apply command.");
   return { ...result, token, tokenConsumed: true };
 }
@@ -395,7 +410,7 @@ async function run() {
   }
 }
 
-export { browserSetupUrl, canonicalInventory, createToken, defaultUserDataDir, parseArguments, readBrowserWebSocketEndpoint, validateLoopbackCdp, validatePlanToken };
+export { browserSetupUrl, canonicalInventory, createApplyBridgeCommand, createToken, defaultUserDataDir, parseArguments, readBrowserWebSocketEndpoint, validateLoopbackCdp, validatePlanToken };
 
 if (import.meta.main) {
   run().catch((error) => fail(error instanceof Error ? error.message : String(error), error?.exitCode || EXIT_OPERATION));

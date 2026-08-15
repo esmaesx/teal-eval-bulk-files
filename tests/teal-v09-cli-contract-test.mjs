@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalInventory, createToken, parseArguments, readBrowserWebSocketEndpoint, validateLoopbackCdp, validatePlanToken } from "../extension/teal-eval-bulk-cli.mjs";
+import { canonicalInventory, createApplyBridgeCommand, createToken, parseArguments, readBrowserWebSocketEndpoint, validateLoopbackCdp, validatePlanToken } from "../extension/teal-eval-bulk-cli.mjs";
 
 const inventory = canonicalInventory([
   { filename: "b.txt", sha256: "b".repeat(64), sizeText: "2 B" },
@@ -35,6 +35,7 @@ const token = createToken(state, {
   operation: "delete",
   targetId: "target-1",
   requestedNames: ["a.txt"],
+  bridgeAuthorizationId: "11111111-1111-4111-8111-111111111111",
   inventory,
   expiresAt: now + 500,
   consumed: false
@@ -47,5 +48,11 @@ state.tokens[token].consumed = true;
 assert.throws(() => validatePlanToken(state.tokens[token], { issueIdentifier: "TAB-TEST", operation: "delete", targetId: "target-1", now }), /already used/i);
 state.tokens[token].consumed = false;
 assert.throws(() => validatePlanToken(state.tokens[token], { issueIdentifier: "TAB-TEST", operation: "delete", targetId: "target-2", now }), /different target/i);
+assert.deepEqual(createApplyBridgeCommand("apply-delete", state.tokens[token]), {
+  command: "apply-delete",
+  names: ["a.txt"],
+  authorizationId: "11111111-1111-4111-8111-111111111111"
+});
+assert.throws(() => createApplyBridgeCommand("apply-delete", { ...state.tokens[token], bridgeAuthorizationId: "bad" }), /authorization/i);
 
 console.log("v0.9 CLI token and inventory tests passed");

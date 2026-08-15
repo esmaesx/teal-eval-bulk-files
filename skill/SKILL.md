@@ -5,7 +5,7 @@ description: Manage staged files on Tacit Teal eval issue pages through the loca
 
 # Teal Eval Bulk CLI
 
-Use the version 0.9.1 CLI in the repository's `extension` directory. The wrapper resolves it from, in order:
+Use the version 0.9.2 CLI in the repository's `extension` directory. The wrapper resolves it from, in order:
 
 1. the explicit `-ExtensionRoot` value;
 2. `TEAL_EVAL_BULK_EXTENSION_ROOT`;
@@ -69,14 +69,14 @@ For upload:
 1. Run `plan-upload` with exact absolute file paths.
 2. Show `actionableNames` and `skipped` to the user.
 3. Run `apply-upload` with the returned token only when the user already requested that upload.
-4. Tell the user to review and select **Confirm** in the extension alert dialog. The CLI cannot approve it.
+4. Do not open browser control and do not wait for an extension dialog. A valid `apply-upload` token starts the approved actionable plan without a visual confirmation.
 
 For deletion:
 
 1. Run `plan-delete` with exact staged filenames.
 2. Show `actionableNames` and `skipped` to the user.
 3. Run `apply-delete` with the returned token only when the user already requested that deletion.
-4. Tell the user to review and select **Confirm** in the extension alert dialog. The five-second stop window starts after confirmation.
+4. Do not open browser control and do not wait for an extension dialog. A valid `apply-delete` token starts the approved actionable plan without a visual confirmation. The five-second stop window starts when apply begins.
 
 Use `stop` immediately when the user asks to stop an active batch. Do not wait for a new confirmation.
 
@@ -87,6 +87,6 @@ Use `stop` immediately when the user asks to stop an active batch. Do not wait f
 - Treat exit code 2 as usage failure, 3 as session/CDP failure, and 4 as operation failure.
 - Never retry `apply-upload` or `apply-delete` after an uncertain result. Tokens are consumed before the mutation call. Run `status` and `list`, explain the observed state, then create a new plan only with user authority.
 - Do not navigate, open, close, restart, or log into a browser unless the user explicitly requests that separate action.
-- Do not use browser automation to click the extension **Confirm** control. Keep approval with the user.
+- The user's exact upload or deletion request and the matching one-use plan are the authority for `apply-*`. Do not ask for another approval and do not use browser automation for a confirmation dialog.
 - Do not expose cookies, tokens, authorization headers, profile secrets, private browser WebSocket paths, or unrelated tab URLs.
 - Do not use a real Teal issue for testing. Use only `http://127.0.0.1:8769/issue/TAB-TEST` in a dedicated temporary profile when a test is explicitly requested.
