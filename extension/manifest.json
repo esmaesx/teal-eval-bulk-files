@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Teal Eval Bulk Files",
+  "version": "0.9.1",
+  "description": "Adds safe bulk upload, bulk download, and bulk delete controls to Teal Alpha eval issue pages.",
+  "permissions": [
+    "downloads",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://platform-teal-alpha.vercel.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://platform-teal-alpha.vercel.app/issue/*"
+      ],
+      "js": [
+        "zip-builder.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

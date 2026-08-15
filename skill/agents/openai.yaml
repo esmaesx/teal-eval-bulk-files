@@ -1,0 +1,4 @@
+interface:
+  display_name: "Teal Eval Bulk CLI"
+  short_description: "Manage Teal staged files through the local CLI"
+  default_prompt: "Use $teal-eval-bulk-cli to manage staged files on a Teal eval issue."

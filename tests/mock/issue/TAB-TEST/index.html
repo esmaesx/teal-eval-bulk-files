@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TAB-TEST - Mock Tacit Evals Platform</title>
+    <style>
+      :root { --bg: #101012; --border: #252528; --accent: #7180ff; --accent-bg: #7180ff1a; --accent-hover: #8a97ff; --danger: #eb5757; --muted: #6b6f76; --placeholder: #434549; --surface: #111113; --success: #4cb782; --text: #e8e8e8; --warning: #f2a93b; }
+      body { margin: 40px; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
+      main { max-width: 760px; margin: auto; }
+      .staged { border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: var(--surface); min-width: 320px; }
+      .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+      button { cursor: pointer; }
+      table { width: 100%; font-size: 11px; border-collapse: collapse; }
+      tr { border-top: 1px solid var(--border); }
+      td { padding: 4px 8px; }
+      td:first-child { padding-left: 0; font-family: monospace; }
+      td:last-child { padding-right: 0; text-align: right; }
+      .danger { color: var(--danger); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>TAB-TEST</h1>
+      <p>Use the unpacked extension's <strong>Bulk files</strong> control for local tests.</p>
+      <div class="staged">
+        <div class="header">
+          <strong style="font-size:13px">Staged files</strong>
+          <button class="add" type="button">Add file</button>
+          <input class="native-input" type="file" style="display:none">
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Mock staged-file panel for local verification.</div>
+        <table><tbody></tbody></table>
+        <div class="native-error" style="color:var(--danger)"></div>
+      </div>
+    </main>
+    <script>
+      (() => {
+        const params = new URLSearchParams(window.location.search);
+        const simulateRace = params.get('race') === '1';
+        const autoConfirm = params.get('autoConfirm') === '1';
+        const deletePromptMode = params.get('deletePrompt') || 'exact';
+        const addButton = document.querySelector('.add');
+        const input = document.querySelector('.native-input');
+        const tbody = document.querySelector('tbody');
+        const nativeError = document.querySelector('.native-error');
+        const encoder = new TextEncoder();
+        let pipelineReadyAt = 0;
+        let forcedFailureUsed = false;
+        let activeSaveRequests = 0;
+        let saveRequestCount = 0;
+        const saveButtonStates = new Map();
+        document.body.dataset.prematureAttempts = '0';
+        document.body.dataset.downloadedFiles = '[]';
+        document.body.dataset.saveAsRequestedFilenames = '[]';
+        document.body.dataset.saveAsRequestedSequences = '[]';
+        document.body.dataset.saveAsConcurrent = '0';
+        document.body.dataset.saveAsMaxConcurrent = '0';
+        document.body.dataset.saveAsCompleted = '0';
+        document.body.dataset.saveAsRequestCount = '0';
+        document.body.dataset.saveAsEntryFilenames = '[]';
+        document.body.dataset.saveAsArchiveFilename = '';
+        document.body.dataset.saveAsZipByteLength = '0';
+        document.body.dataset.saveAsZipFirstFourHex = '';
+        document.body.dataset.nativeRemovePromptCalls = '0';
+
+        function makeHash(name) {
+          const knownHashes = {
+            'existing-alpha.txt': '8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8',
+            'existing-beta.csv': 'f44e64e75f3948e9f73f8dfa94721c4ce8cbb4f265c4790c702b2d41cfbf2753',
+            'existing-gamma.json': 'be9d587defa1f0c09ef49eb17e206983a5f8f8289e4281860bd0ee5a19592c67',
+            'existing-delta.md': '4f4a9410ffcdf895c4adb880659e9b5c0dd1f23a30790684340b3eaacb045398'
+          };
+          if (knownHashes[name]) return knownHashes[name];
+          const bytes = encoder.encode(name);
+          let value = 0;
+          for (const byte of bytes) value = (value * 31 + byte) >>> 0;
+          return value.toString(16).padStart(8, '0').repeat(8);
+        }
+
+        function addRow(file) {
+          const hash = makeHash(file.name);
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${file.name}</td><td>${file.size} B</td><td><span title="${hash}">${hash.slice(0, 8)}</span></td><td><button type="button">download</button><button class="danger" type="button">remove</button></td>`;
+          tr.querySelector('button:not(.danger)').addEventListener('click', () => {
+            const downloaded = JSON.parse(document.body.dataset.downloadedFiles || '[]');
+            downloaded.push(file.name);
+            document.body.dataset.downloadedFiles = JSON.stringify(downloaded);
+            if (params.get('staleDownload') === '1' && downloaded.length === 1) {
+              tr.nextElementSibling?.remove();
+            }
+          });
+          tr.querySelector('.danger').addEventListener('click', () => {
+            const ask = (text) => {
+              document.body.dataset.nativeRemovePromptCalls = String(Number(document.body.dataset.nativeRemovePromptCalls || '0') + 1);
+              return confirm(text);
+            };
+            if (!autoConfirm && deletePromptMode !== 'none') {
+              const firstText = deletePromptMode === 'wrong'
+                ? 'Wrong staged-file prompt'
+                : 'Remove this staged file? Active runs may still reference it.';
+              if (!ask(firstText)) return;
+              if (deletePromptMode === 'repeated' && !ask('Remove this staged file? Active runs may still reference it.')) return;
+            }
+            window.setTimeout(() => {
+              const table = tr.closest('table');
+              const loading = document.createElement('div');
+              loading.className = 'native-loading';
+              loading.textContent = 'Loading…';
+              table.replaceWith(loading);
+              window.setTimeout(() => {
+                tr.remove();
+                loading.replaceWith(table);
+              }, 260);
+            }, 60);
+          });
+          tbody.appendChild(tr);
+        }
+
+        function saveDelayMs() {
+          const delay = Number(params.get('saveDelayMs'));
+          return Number.isFinite(delay) && delay > 0 ? delay : 0;
+        }
+
+        function failSaveAt() {
+          const requestNumber = Number(params.get('failSaveAt'));
+          return Number.isInteger(requestNumber) && requestNumber > 0 ? requestNumber : 0;
+        }
+
+        function recordSaveRequest(detail) {
+          const filenames = JSON.parse(document.body.dataset.saveAsRequestedFilenames || '[]');
+          const sequences = JSON.parse(document.body.dataset.saveAsRequestedSequences || '[]');
+          const entryFilenames = Array.isArray(detail.entries)
+            ? detail.entries.map((entry) => entry?.filename).filter((filename) => typeof filename === 'string')
+            : [];
+          filenames.push(...entryFilenames);
+          sequences.push(detail.sequence);
+          document.body.dataset.saveAsRequestedFilenames = JSON.stringify(filenames);
+          document.body.dataset.saveAsRequestedSequences = JSON.stringify(sequences);
+          document.body.dataset.saveAsEntryFilenames = JSON.stringify(entryFilenames);
+          document.body.dataset.saveAsArchiveFilename = detail.archiveFilename || '';
+        }
+
+        function findNativeDownloadButtons(entries) {
+          const filenames = new Set(entries
+            .map((entry) => entry?.filename)
+            .filter((filename) => typeof filename === 'string'));
+          return [...tbody.querySelectorAll('tr')]
+            .filter((row) => filenames.has(row.querySelector('td:first-child')?.textContent))
+            .map((row) => row.querySelector('button:not(.danger)'))
+            .filter(Boolean);
+        }
+
+        function setNativeDownloadBusy(button) {
+          if (!button) return;
+          const state = saveButtonStates.get(button) || { count: 0, text: button.textContent };
+          state.count += 1;
+          saveButtonStates.set(button, state);
+          button.textContent = 'downloading…';
+        }
+
+        function resetNativeDownloadButton(button) {
+          if (!button) return;
+          const state = saveButtonStates.get(button);
+          if (!state) return;
+          state.count -= 1;
+          if (state.count > 0) return;
+          button.textContent = state.text;
+          saveButtonStates.delete(button);
+        }
+
+        function readZipBlob(blobUrl) {
+          return fetch(blobUrl)
+            .then((response) => {
+              if (!response.ok) throw new Error(`Mock ZIP fetch returned ${response.status}.`);
+              return response.arrayBuffer();
+            })
+            .then((buffer) => {
+              const bytes = new Uint8Array(buffer);
+              document.body.dataset.saveAsZipByteLength = String(bytes.byteLength);
+              document.body.dataset.saveAsZipFirstFourHex = [...bytes.slice(0, 4)]
+                .map((byte) => byte.toString(16).padStart(2, '0'))
+                .join('');
+            });
+        }
+
+        document.addEventListener('teal-eval-bulk-files-v1-save-as-request', (event) => {
+          const detail = event.detail || {};
+          if (
+            typeof detail.requestId !== 'string' || !detail.requestId ||
+            detail.sequence !== 0 ||
+            !Array.isArray(detail.entries) ||
+            typeof detail.archiveFilename !== 'string' ||
+            typeof detail.blobUrl !== 'string'
+          ) return;
+
+          saveRequestCount += 1;
+          document.body.dataset.saveAsRequestCount = String(saveRequestCount);
+          recordSaveRequest(detail);
+          activeSaveRequests += 1;
+          document.body.dataset.saveAsConcurrent = String(activeSaveRequests);
+          document.body.dataset.saveAsMaxConcurrent = String(Math.max(
+            Number(document.body.dataset.saveAsMaxConcurrent || '0'),
+            activeSaveRequests
+          ));
+
+          const nativeButtons = findNativeDownloadButtons(detail.entries);
+          nativeButtons.forEach(setNativeDownloadBusy);
+          document.dispatchEvent(new CustomEvent('teal-eval-bulk-files-v1-save-as-response', {
+            detail: { requestId: detail.requestId, accepted: true }
+          }));
+
+          const requestNumber = saveRequestCount;
+          const delay = new Promise((resolve) => window.setTimeout(resolve, saveDelayMs()));
+          const zipRead = readZipBlob(detail.blobUrl)
+            .then(() => null)
+            .catch((error) => error instanceof Error ? error.message : String(error));
+          Promise.all([zipRead, delay])
+            .then(([zipError]) => {
+              const failed = requestNumber === failSaveAt() || Boolean(zipError);
+              const error = zipError || undefined;
+              document.dispatchEvent(new CustomEvent('teal-eval-bulk-files-v1-save-as-response', {
+                detail: failed
+                  ? { requestId: detail.requestId, ok: false, error: error || `Mock Save As failed at request ${requestNumber}.` }
+                  : { requestId: detail.requestId, ok: true, downloadId: 1 }
+              }));
+              activeSaveRequests -= 1;
+              document.body.dataset.saveAsConcurrent = String(activeSaveRequests);
+              document.body.dataset.saveAsCompleted = String(Number(document.body.dataset.saveAsCompleted || '0') + 1);
+              nativeButtons.forEach(resetNativeDownloadButton);
+            });
+        });
+
+        input.addEventListener('change', () => {
+          const file = input.files && input.files[0];
+          if (!file) return;
+          nativeError.textContent = '';
+          if (simulateRace && Date.now() < pipelineReadyAt) {
+            document.body.dataset.prematureAttempts = String(Number(document.body.dataset.prematureAttempts) + 1);
+            addButton.disabled = true;
+            addButton.textContent = 'Uploading…';
+            window.setTimeout(() => {
+              nativeError.textContent = 'Failed to fetch';
+              addButton.textContent = 'Add file';
+              addButton.disabled = false;
+              input.value = '';
+            }, 120);
+            return;
+          }
+          if (params.get('failFirst') === '1' && !forcedFailureUsed) {
+            forcedFailureUsed = true;
+            addButton.disabled = true;
+            addButton.textContent = 'Uploading…';
+            window.setTimeout(() => {
+              nativeError.textContent = 'Failed to fetch';
+              addButton.textContent = 'Add file';
+              addButton.disabled = false;
+              input.value = '';
+            }, 120);
+            return;
+          }
+          addButton.disabled = true;
+          addButton.textContent = 'Uploading…';
+          window.setTimeout(() => {
+            addButton.textContent = 'Finalizing…';
+            window.setTimeout(() => {
+              addRow(file);
+              addButton.textContent = 'Add file';
+              addButton.disabled = false;
+              input.value = '';
+              if (simulateRace) pipelineReadyAt = Date.now() + 1_200;
+            }, 120);
+          }, 120);
+        });
+
+        addButton.addEventListener('click', () => input.click());
+        addRow(new File(['alpha'], 'existing-alpha.txt', { type: 'text/plain' }));
+        addRow(new File(['beta'], 'existing-beta.csv', { type: 'text/csv' }));
+        addRow(new File(['gamma'], 'existing-gamma.json', { type: 'application/json' }));
+        addRow(new File(['delta'], 'existing-delta.md', { type: 'text/markdown' }));
+        if (params.get('duplicateRows') === '1') {
+          addRow(new File(['alpha'], 'existing-alpha.txt', { type: 'text/plain' }));
+        }
+        if (params.get('disabledDownload') === '1') {
+          tbody.querySelectorAll('tr')[1]?.querySelector('button:not(.danger)')?.setAttribute('disabled', '');
+        }
+      })();
+    </script>
+    <script>
+      if (new URLSearchParams(window.location.search).get('autoConfirm') === '1') {
+        Object.defineProperty(window, 'confirm', {
+          configurable: true,
+          value: () => true
+        });
+      }
+    </script>
+  </body>
+</html>

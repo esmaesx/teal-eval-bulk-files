@@ -1,0 +1,7 @@
+.codex/
+node_modules/
+__pycache__/
+*.pyc
+tests/test-manifest.json
+artifacts/
+
