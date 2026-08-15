@@ -1,74 +1,110 @@
 # Teal Eval Bulk Files
 
-This repository contains:
+Teal Eval Bulk Files adds reliable batch file controls to Tacit Teal eval issue pages. It includes:
 
-- a Chrome and Microsoft Edge extension for bulk upload, one-ZIP download, and bulk deletion of staged files on Teal Alpha eval issue pages;
-- a dependency-free Node 24 CLI with explicit two-phase upload and delete plans;
-- a Codex skill that selects a browser session and calls the CLI safely;
-- local tests and a false `TAB-TEST` eval page.
+- a Chrome and Microsoft Edge extension for loose-file upload, one-ZIP download, and checked bulk deletion;
+- a dependency-free Node 24 CLI for LLM and terminal workflows;
+- a Codex skill that selects an open browser session and calls the CLI;
+- a complete local-only demonstration page and repeatable screenshot tests.
 
-The current release is `0.9.1`.
+Current release: `0.9.2`.
+
+![Complete fictional eval page with the Bulk files control](docs/images/eval-page-overview.png)
+
+## Main features
+
+- Drag several loose files into one upload target.
+- Skip duplicate filenames and continue with new files.
+- Download selected staged files in one ZIP and use one Save As dialog.
+- Select staged files with checkboxes before deletion.
+- Stop an upload after the current file or stop a deletion during its five-second delay.
+- Keep human Confirm/Cancel review inside the extension.
+- Let an authorized CLI plan apply without a visual confirmation click.
+- Reject stale, mismatched, expired, ambiguous, or reused CLI plans.
 
 ## Install the extension
 
 1. Clone or download this repository.
-2. Open `chrome://extensions` or `edge://extensions`.
-3. Enable developer mode.
+2. Open `chrome://extensions` in Chrome or `edge://extensions` in Microsoft Edge.
+3. Enable **Developer mode**.
 4. Select **Load unpacked**.
-5. Select the `extension` directory.
+5. Select the repository's `extension` directory.
+6. Reload the Teal issue page.
 
-Reload the unpacked extension after a source update.
+For update and troubleshooting steps, see [Browser installation](docs/browser-installation.md).
+
+## Use the human interface
+
+Open a Teal Alpha issue page and find **Staged files**. Select **Bulk files**, then select one mode:
+
+- **Upload loose files**: drag files or use **Choose files**.
+- **Download staged files**: select rows and create one ZIP.
+- **Delete staged files**: select rows, review the exact names, and use the stop delay if needed.
+
+![Upload mode with two new files and one duplicate](docs/images/upload-mode.png)
+
+See [Human interface guide](docs/human-interface.md) for all controls, duplicate rules, partial results, and stop behavior.
 
 ## Install the Codex skill
 
-Copy the `skill` directory to your Codex skills directory and name it `teal-eval-bulk-cli`. On Windows, this is usually:
+Copy the `skill` directory to the Codex skills directory and name it `teal-eval-bulk-cli`. On Windows, the usual destination is:
 
 ```text
 %USERPROFILE%\.codex\skills\teal-eval-bulk-cli
 ```
 
-Set `TEAL_EVAL_BULK_EXTENSION_ROOT` to the absolute path of the cloned `extension` directory when the skill is installed separately. When the skill and extension stay in this repository layout, the wrapper finds the sibling `extension` directory automatically.
+If the skill is not kept beside the repository's `extension` directory, set `TEAL_EVAL_BULK_EXTENSION_ROOT` to the absolute extension path.
 
-## Use the current browser session
+## Use the CLI
 
-Normal page authorization and CLI transport are different permissions. For Chrome, open `chrome://inspect/#remote-debugging`. For Edge, open `edge://inspect/#remote-debugging`. Enable remote debugging for the current browser session. Approve the local connection prompt when the CLI starts.
+The CLI attaches to an already open Chrome or Edge session. It does not launch a browser, log in, or navigate.
 
-Then use the wrapper with the browser that contains the exact open issue tab:
+Enable the browser's protected local debugging bridge at `chrome://inspect/#remote-debugging` or `edge://inspect/#remote-debugging`. Then call the wrapper with the browser and exact issue ID:
 
 ```powershell
 & .\skill\scripts\invoke-teal-cli.ps1 -Browser edge -Issue ABC-123 -Command status
 & .\skill\scripts\invoke-teal-cli.ps1 -Browser edge -Issue ABC-123 -Command list
 ```
 
-The CLI fails if the selected browser has no exact matching issue tab or has more than one matching tab. It does not switch to another browser or profile.
+Uploads and deletions use two commands: `plan-*` returns a one-use token, and `apply-*` rechecks the exact plan before it starts. The user's requested plan is the CLI approval boundary. No extension dialog click is required.
+
+![Fictional CLI plan and apply example](docs/images/cli-plan-example.png)
+
+See [CLI guide](docs/cli-guide.md) for browser selection, every command, JSON fields, and failure recovery.
 
 ## Safety model
 
 - The production extension runs only on `https://platform-teal-alpha.vercel.app/issue/*`.
 - The CLI accepts only loopback debugging connections.
-- Current-session mode reads only the browser's small `DevToolsActivePort` record. It does not read cookies, credentials, history, or profile databases.
-- Upload and delete use one-use plan tokens bound to the issue, target tab, requested names, and staged inventory.
-- The CLI cannot approve a mutation. A trusted user click on the extension's closed confirmation dialog is still required.
-- Duplicate upload names are skipped independently. Other files continue.
-- Bulk deletion has a five-second stop window and continues only while the exact staged row can be proved.
+- The CLI reads no cookies, passwords, browser history, or credential databases.
+- Upload and delete plans are bound to the issue, target tab, requested names, and staged inventory.
+- Human actions keep the extension's closed-shadow confirmation dialog.
+- CLI actions require the exact requested plan and two one-use authorization layers.
+- Real Teal issues are never used for mutation tests.
 
-See [extension/README.md](extension/README.md) and [skill/references/cli-contract.md](skill/references/cli-contract.md) for the full contract.
+Local browser debugging is trusted local mutation authority. The plan controls prevent accidental or stale applies. They cannot protect a debugging session from another hostile local process that already controls it.
 
-## Local tests
+## Documentation
 
-Requirements: Node 24, Python 3 for the mock server, and optional 7-Zip for an external ZIP check.
+- [Browser installation and update](docs/browser-installation.md)
+- [Human interface](docs/human-interface.md)
+- [CLI and Codex skill](docs/cli-guide.md)
+- [Local demonstration and screenshot reproduction](docs/local-demo.md)
+- [Extension implementation details](extension/README.md)
+- [CLI contract](skill/references/cli-contract.md)
+
+## Tests
+
+Requirements: Node 24 and Python 3. Screenshot capture also needs Playwright's Chromium browser.
 
 ```powershell
+npm install
 npm test
 npm run test:manifest
-npm run mock
+npm run docs:verify
 ```
 
-Open `http://127.0.0.1:8769/issue/TAB-TEST` only with a test manifest and a dedicated temporary browser profile. Do not test mutations on a real Teal issue.
-
-## Documentation and screenshots
-
-Future screenshots must use only the local `TAB-TEST` page with fake filenames and content. Keep account names, profile paths, browser history, credentials, real issue IDs, and real Linear content out of every image. A full guide can use `docs/guide.md` with images under `docs/images/`.
+The complete demonstration and screenshot workflow is in [Local demonstration and screenshot reproduction](docs/local-demo.md).
 
 ## License
 

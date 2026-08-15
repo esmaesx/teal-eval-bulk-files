@@ -26,6 +26,8 @@
   const COMMAND_EXECUTE_MESSAGE = "teal-eval-bulk-command-execute-v1";
   const NATIVE_DELETE_MESSAGE = "teal-eval-bulk-native-delete-v1";
   const BRIDGE_GLOBAL = "__TEAL_EVAL_BULK_V09_BRIDGE__";
+  const BRIDGE_PLAN_TTL_MS = 60 * 60 * 1000;
+  const BRIDGE_AUTHORIZATION_PATTERN = /^[A-Za-z0-9-]{16,80}$/;
 
   if (document.getElementById(HOST_ID)) {
     return;
@@ -464,6 +466,14 @@
   let pendingConfirmation = null;
   let activeOperation = "";
   const pendingZipRequests = new Map();
+  const bridgePlanStore = globalThis.TealEvalBridgePlanStore.createStore({
+    ttlMs: BRIDGE_PLAN_TTL_MS,
+    authorizationPattern: BRIDGE_AUTHORIZATION_PATTERN,
+    createAuthorizationId: createBridgeAuthorizationId,
+    now: () => Date.now(),
+    getInventory: () => publicInventory(),
+    parseNames: (names) => parseBridgeNames(names)
+  });
 
   function escapeHtml(value) {
     return String(value)
@@ -911,7 +921,9 @@
       return { operation: "upload", succeeded: [], skipped: skipped.map(({ file, reason }) => ({ name: file.name, reason })), failed: [], remaining: [] };
     }
 
-    const confirmed = await requestBatchConfirmation({
+    // A CLI apply is already gated by its one-use plan token and exact
+    // inventory recheck. Keep the visible confirmation for human UI actions.
+    const confirmed = options.fromBridge ? true : await requestBatchConfirmation({
       title: `Upload ${uploadable.length} new file${uploadable.length === 1 ? "" : "s"}?`,
       copy: `The Teal platform will post one Linear comment for each successfully finalized file.${skipped.length ? ` ${skipped.length} duplicate selection${skipped.length === 1 ? " is" : "s are"} skipped.` : ""}`,
       names: uploadable.map((file) => `${file.name} (${formatBytes(file.size)})`),
@@ -1356,7 +1368,9 @@
       return { operation: "delete", succeeded: [], skipped: [], failed: [{ error: "The staged-file list changed." }], remaining: [] };
     }
 
-    const confirmed = await requestBatchConfirmation({
+    // A CLI apply is already gated by its one-use plan token and exact
+    // inventory recheck. Keep the visible confirmation for human UI actions.
+    const confirmed = options.fromBridge ? true : await requestBatchConfirmation({
       title: `Permanently delete ${selected.length} staged file${selected.length === 1 ? "" : "s"}?`,
       copy: "Completed deletions cannot be undone. Active runs may still reference these files. After confirmation, you have five seconds to stop before the first deletion starts.",
       names: selected.map((row) => `${row.filename} · ${String(row.sha256 || "").slice(0, 8)}`),
@@ -1454,6 +1468,12 @@
       .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right), "en-US"));
   }
 
+  function createBridgeAuthorizationId() {
+    if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(24));
+    return [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+  }
+
   function planUploadFromNames(names) {
     const requestedNames = parseBridgeNames(names);
     const usedNames = new Set();
@@ -1538,16 +1558,22 @@
     if (command.command === "list") {
       return { ok: true, issueIdentifier, inventory: publicInventory() };
     }
-    if (command.command === "plan-upload") return publicPlan(planUploadFromNames(command.names));
-    if (command.command === "plan-delete") return publicPlan(planDeleteFromNames(command.names));
-    if (command.command === "apply-upload") {
+    if (command.command === "plan-upload") {
       const plan = planUploadFromNames(command.names);
+      return { ...publicPlan(plan), authorizationId: bridgePlanStore.create(plan) };
+    }
+    if (command.command === "plan-delete") {
+      const plan = planDeleteFromNames(command.names);
+      return { ...publicPlan(plan), authorizationId: bridgePlanStore.create(plan) };
+    }
+    if (command.command === "apply-upload") {
+      const plan = bridgePlanStore.consume({ authorizationId: command.authorizationId, operation: "upload", names: command.names });
       if (!plan.files.length) return { ...publicPlan(plan), succeeded: [], failed: [], remaining: [] };
       const result = await startUpload({ files: plan.files, fromBridge: true });
       return { ...publicPlan(plan), ...result, skipped: [...plan.skipped, ...(result?.skipped || [])] };
     }
     if (command.command === "apply-delete") {
-      const plan = planDeleteFromNames(command.names);
+      const plan = bridgePlanStore.consume({ authorizationId: command.authorizationId, operation: "delete", names: command.names });
       if (!plan.rows.length) return { ...publicPlan(plan), succeeded: [], failed: [], remaining: [] };
       const result = await startDelete({ rows: plan.rows, fromBridge: true });
       return { ...publicPlan(plan), ...result, skipped: [...plan.skipped, ...(result?.skipped || [])] };
@@ -1562,13 +1588,14 @@
 
   function sendNarrowBridgeCommand(value) {
     if (!value || typeof value !== "object") return Promise.reject(new Error("The command was invalid."));
-    const allowedKeys = new Set(["command", "names"]);
+    const allowedKeys = new Set(["command", "names", "authorizationId"]);
     if (!Object.keys(value).every((key) => allowedKeys.has(key))) return Promise.reject(new Error("The command contained an unsupported field."));
     if (!["status", "list", "plan-upload", "apply-upload", "plan-delete", "apply-delete", "stop"].includes(value.command)) {
       return Promise.reject(new Error("The command was not allowed."));
     }
     const request = { type: COMMAND_REQUEST_MESSAGE, command: value.command, issueIdentifier };
     if (Object.prototype.hasOwnProperty.call(value, "names")) request.names = value.names;
+    if (Object.prototype.hasOwnProperty.call(value, "authorizationId")) request.authorizationId = value.authorizationId;
     return chrome.runtime.sendMessage(request);
   }
 
