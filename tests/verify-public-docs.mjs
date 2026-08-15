@@ -1,0 +1,64 @@
+#!/usr/bin/env node
+
+import { readdir, readFile, stat } from "node:fs/promises";
+import { extname, relative, resolve, sep } from "node:path";
+
+const root = resolve(import.meta.dirname, "..");
+const expectedImages = [
+  "docs/images/eval-page-overview.png",
+  "docs/images/upload-mode.png",
+  "docs/images/download-mode.png",
+  "docs/images/delete-mode.png",
+  "docs/images/cli-plan-example.png"
+];
+const excludedParts = new Set([".git", ".codex", "node_modules", "artifacts"]);
+const forbiddenInternalLabel = /tab-test/i;
+const realIssueUrl = /https:\/\/platform-teal-alpha\.vercel\.app\/issue\/[A-Z][A-Z0-9]+-\d+/i;
+
+async function collectMarkdown(directory) {
+  const files = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (excludedParts.has(entry.name)) continue;
+    const path = resolve(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await collectMarkdown(path));
+    else if (entry.isFile() && extname(entry.name).toLowerCase() === ".md") files.push(path);
+  }
+  return files;
+}
+
+function pngDimensions(buffer) {
+  const signature = "89504e470d0a1a0a";
+  if (buffer.subarray(0, 8).toString("hex") !== signature || buffer.length < 24) {
+    throw new Error("Not a valid PNG header.");
+  }
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
+const failures = [];
+for (const path of await collectMarkdown(root)) {
+  const content = await readFile(path, "utf8");
+  const display = relative(root, path).split(sep).join("/");
+  if (forbiddenInternalLabel.test(content)) failures.push(`${display}: contains the private internal route label.`);
+  if (realIssueUrl.test(content)) failures.push(`${display}: contains a real-looking production issue URL.`);
+}
+
+for (const relativePath of expectedImages) {
+  const path = resolve(root, relativePath);
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size < 10_000) failures.push(`${relativePath}: image is missing or too small.`);
+    const dimensions = pngDimensions(await readFile(path));
+    if (dimensions.width < 700 || dimensions.height < 400) {
+      failures.push(`${relativePath}: unexpected dimensions ${dimensions.width}x${dimensions.height}.`);
+    }
+  } catch (error) {
+    failures.push(`${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+if (failures.length) {
+  process.stderr.write(`${failures.join("\n")}\n`);
+  process.exitCode = 1;
+} else {
+  process.stdout.write(`Verified public Markdown and ${expectedImages.length} screenshots.\n`);
+}

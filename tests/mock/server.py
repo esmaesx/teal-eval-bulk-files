@@ -1,6 +1,7 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
+import os
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -10,6 +11,7 @@ MOCK_ROOT = Path(__file__).resolve().parent
 MOCK_HTML = MOCK_ROOT / "issue" / "TAB-TEST" / "index.html"
 EXTENSION_SCRIPT = WORKSPACE / "extension" / "content.js"
 ZIP_BUILDER_SCRIPT = WORKSPACE / "extension" / "zip-builder.js"
+MOCK_PORT = int(os.environ.get("TEAL_MOCK_PORT", "8769"))
 
 
 MOCK_SOURCE_BYTES_BY_FILENAME = {
@@ -57,16 +59,18 @@ MOCK_DOWNLOAD_BYTES = {
     for row in STAGED_FILES
 }
 
+DEMO_ISSUE_IDENTIFIERS = {"TAB-TEST", "DEMO-204"}
+
 
 class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         request = urlsplit(self.path)
         path = request.path
-        if path in {"/issue/TAB-TEST", "/issue/TAB-TEST/"}:
+        if path.rstrip("/") in {f"/issue/{identifier}" for identifier in DEMO_ISSUE_IDENTIFIERS}:
             return self.send_file(MOCK_HTML, "text/html; charset=utf-8")
         if path == "/api/staged-files":
             issue_identifier = parse_qs(request.query).get("issue_identifier", [None])[0]
-            if issue_identifier != "TAB-TEST":
+            if issue_identifier not in DEMO_ISSUE_IDENTIFIERS:
                 return self.send_json({"error": "Unknown issue identifier."}, status=404)
             rows = [
                 {**row, "sha256": make_hash(row["filename"])}
@@ -78,7 +82,7 @@ class Handler(SimpleHTTPRequestHandler):
             if staged_id not in MOCK_DOWNLOAD_BYTES:
                 return self.send_json({"error": "Unknown staged file."}, status=404)
             return self.send_json({
-                "download_url": f"http://127.0.0.1:8769/mock-downloads/{staged_id}"
+                "download_url": f"http://127.0.0.1:{MOCK_PORT}/mock-downloads/{staged_id}"
             })
         if path.startswith("/mock-downloads/"):
             staged_id = path.removeprefix("/mock-downloads/")
@@ -119,4 +123,4 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("127.0.0.1", 8769), Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", MOCK_PORT), Handler).serve_forever()

@@ -6,6 +6,11 @@
   "scripts": {
     "test": "node tests/teal-v09-cli-contract-test.mjs && node tests/teal-v09-cli-process-test.mjs && node tests/bridge-plan-store.test.js && node tests/teal-extension-background-test.js && node tests/teal-extension-bridge-test.js && node tests/zip-builder.test.js && node tests/teal-v09-background-security-test.js",
     "test:manifest": "node tests/generate-teal-test-manifest.mjs tests/test-manifest.json",
-    "mock": "python tests/mock/server.py"
+    "mock": "python tests/mock/server.py",
+    "docs:capture": "node tests/capture-doc-screenshots.mjs",
+    "docs:verify": "node tests/verify-public-docs.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.62.1"
   }
 }

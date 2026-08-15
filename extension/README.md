@@ -70,13 +70,13 @@ For deletions, the final confirmation shows the exact filename and the first eig
 `teal-eval-bulk-cli.mjs` is a dependency-free Node 24 tool for an already open browser. It supports an explicit loopback CDP endpoint and a user-selected current Chrome or Edge session. It does not launch a browser, open a tab, navigate a page, read cookies, or read credential stores.
 
 ```text
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue TAB-TEST status
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue TAB-TEST list
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue TAB-TEST plan-upload C:\files\one.txt C:\files\two.csv
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue TAB-TEST apply-upload <plan-token>
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue TAB-TEST plan-delete old-file.txt
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue TAB-TEST apply-delete <plan-token>
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue TAB-TEST stop
+node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 status
+node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 list
+node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 plan-upload C:\files\one.txt C:\files\two.csv
+node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 apply-upload <plan-token>
+node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 plan-delete old-file.txt
+node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 apply-delete <plan-token>
+node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 stop
 ```
 
 For a selected current Chrome or Edge session, first enable remote debugging at `chrome://inspect/#remote-debugging` or `edge://inspect/#remote-debugging`. The browser can show one local connection permission prompt. Then use:
@@ -102,7 +102,7 @@ Treat local CDP access as a trusted local mutation authority. The one-use plan l
 
 Each `plan-*` command writes a random, one-use token in the local temporary state file. The extension also returns a short-lived, one-use authorization ID that the CLI keeps only inside that token record and does not print. The plan is bound to the issue ID, target tab ID, operation, exact requested names, original planned upload `File` objects or delete rows, and a sorted staged-file inventory. `apply-*` rechecks that inventory, consumes both authorization layers, and starts the batch without a visual confirmation. The JSON result reports `succeeded`, `skipped`, `failed`, and `remaining`; it never retries a mutation automatically.
 
-For local-only verification, `work/generate-teal-test-manifest.mjs` can create a manifest with the exact `http://127.0.0.1:8769/issue/*` match and exact loopback host permission. It changes only the generated manifest. The extension source files are unchanged. Do not package that generated manifest.
+For local-only verification, `tests/generate-teal-test-manifest.mjs` can create a manifest with the exact `http://127.0.0.1:8769/issue/*` match and exact loopback host permission. It changes only the generated manifest. The extension source files are unchanged. Do not package that generated manifest.
 
 ## Permissions
 

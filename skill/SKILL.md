@@ -89,4 +89,4 @@ Use `stop` immediately when the user asks to stop an active batch. Do not wait f
 - Do not navigate, open, close, restart, or log into a browser unless the user explicitly requests that separate action.
 - The user's exact upload or deletion request and the matching one-use plan are the authority for `apply-*`. Do not ask for another approval and do not use browser automation for a confirmation dialog.
 - Do not expose cookies, tokens, authorization headers, profile secrets, private browser WebSocket paths, or unrelated tab URLs.
-- Do not use a real Teal issue for testing. Use only `http://127.0.0.1:8769/issue/TAB-TEST` in a dedicated temporary profile when a test is explicitly requested.
+- Do not use a real Teal issue for testing. Use only the repository's fictional local demo issue in a dedicated temporary profile when a test is explicitly requested.

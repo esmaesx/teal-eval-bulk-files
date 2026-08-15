@@ -3,36 +3,245 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>TAB-TEST - Mock Tacit Evals Platform</title>
+    <title>DEMO-204 · Tacit Evals</title>
     <style>
-      :root { --bg: #101012; --border: #252528; --accent: #7180ff; --accent-bg: #7180ff1a; --accent-hover: #8a97ff; --danger: #eb5757; --muted: #6b6f76; --placeholder: #434549; --surface: #111113; --success: #4cb782; --text: #e8e8e8; --warning: #f2a93b; }
-      body { margin: 40px; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
-      main { max-width: 760px; margin: auto; }
-      .staged { border: 1px solid var(--border); border-radius: 6px; padding: 12px; background: var(--surface); min-width: 320px; }
-      .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+      :root {
+        color-scheme: dark;
+        --bg: #101012;
+        --border: #29292d;
+        --accent: #7180ff;
+        --accent-bg: #7180ff1a;
+        --accent-hover: #8a97ff;
+        --danger: #ef6464;
+        --muted: #8b8c92;
+        --placeholder: #55565d;
+        --surface: #151517;
+        --surface-raised: #19191c;
+        --success: #4cb782;
+        --text: #e8e8e8;
+        --warning: #f2a93b;
+      }
+      * { box-sizing: border-box; }
+      html { background: var(--bg); }
+      body {
+        min-width: 1100px;
+        margin: 0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 12px;
+      }
+      button, input, select { font: inherit; }
       button { cursor: pointer; }
-      table { width: 100%; font-size: 11px; border-collapse: collapse; }
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        height: 58px;
+        display: grid;
+        grid-template-columns: auto minmax(260px, 520px) auto 1fr auto;
+        gap: 12px;
+        align-items: center;
+        padding: 0 18px;
+        background: #121214;
+        border-bottom: 1px solid var(--border);
+      }
+      .brand { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 700; }
+      .brand-mark {
+        width: 27px;
+        height: 27px;
+        display: grid;
+        place-items: center;
+        border-radius: 7px;
+        background: linear-gradient(145deg, #8c78ff, #596bff);
+        color: white;
+        font-weight: 800;
+      }
+      .search { display: flex; gap: 7px; }
+      .search input {
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #0f0f11;
+        color: var(--text);
+      }
+      .button, .compact-button {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--surface-raised);
+        color: var(--text);
+      }
+      .button { padding: 8px 12px; }
+      .compact-button { padding: 5px 9px; }
+      .button.primary { border-color: #755ef2; background: #755ef2; color: #fff; font-weight: 700; }
+      .top-actions { justify-self: end; display: flex; align-items: center; gap: 9px; color: var(--muted); }
+      .account { padding-left: 10px; border-left: 1px solid var(--border); color: var(--text); }
+      .page { padding: 18px 22px 60px; }
+      .issue-heading { display: flex; align-items: baseline; gap: 11px; margin-bottom: 14px; }
+      .issue-heading h1 { margin: 0; font-size: 18px; letter-spacing: -0.01em; }
+      .taxonomy { color: var(--muted); }
+      .workspace-grid {
+        display: grid;
+        grid-template-columns: 188px minmax(0, 1fr) minmax(0, 1fr);
+        gap: 12px;
+        align-items: stretch;
+      }
+      .rail, .panel-card, .staged, .history-card {
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        background: var(--surface);
+      }
+      .rail { min-height: 505px; padding: 11px; }
+      .rail-group + .rail-group { margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--border); }
+      .rail-label { margin-bottom: 7px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+      .rail button, .rail select {
+        width: 100%;
+        margin-top: 7px;
+        padding: 8px 9px;
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        background: #111113;
+        color: var(--text);
+        text-align: left;
+      }
+      .rail button.accent { border-color: #5e68c8; background: #181a28; }
+      .panel-card { min-width: 0; height: 505px; display: flex; flex-direction: column; overflow: hidden; }
+      .panel-header, .header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+      }
+      .panel-header { min-height: 47px; padding: 11px 13px; border-bottom: 1px solid var(--border); }
+      .panel-title { font-size: 13px; font-weight: 700; }
+      .panel-meta { color: var(--muted); font-size: 10px; }
+      .panel-content { min-height: 0; padding: 16px 17px 20px; overflow: auto; line-height: 1.58; }
+      .panel-content h2 { margin: 0 0 13px; font-size: 15px; }
+      .panel-content h3 { margin: 20px 0 8px; font-size: 12px; }
+      .panel-content p { margin: 0 0 12px; }
+      .panel-content ul { margin: 8px 0 14px; padding-left: 20px; }
+      .file-chip { display: inline-flex; padding: 3px 7px; border: 1px solid #3b3d56; border-radius: 4px; background: #1a1b27; color: #cbd0ff; font: 11px ui-monospace, Consolas, monospace; }
+      .criterion { margin-bottom: 9px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 6px; background: #111113; }
+      .criterion strong { display: block; margin-bottom: 4px; color: #cfd2ff; }
+      .score { float: right; color: var(--muted); font-weight: 500; }
+      .staged { margin-top: 12px; padding: 12px 13px 13px; min-width: 320px; }
+      .header { margin-bottom: 8px; }
+      .header-actions { display: flex; align-items: center; gap: 7px; }
+      .staged-copy { margin-bottom: 8px; color: var(--muted); font-size: 11px; }
+      table { width: 100%; border-collapse: collapse; font-size: 11px; }
       tr { border-top: 1px solid var(--border); }
-      td { padding: 4px 8px; }
-      td:first-child { padding-left: 0; font-family: monospace; }
-      td:last-child { padding-right: 0; text-align: right; }
-      .danger { color: var(--danger); }
+      td { padding: 7px 8px; }
+      td:first-child { padding-left: 0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+      td:nth-child(2), td:nth-child(3) { color: var(--muted); white-space: nowrap; }
+      td:last-child { padding-right: 0; text-align: right; white-space: nowrap; }
+      td button { margin-left: 5px; border: 0; background: transparent; color: #aeb4ff; }
+      td button.danger { color: var(--danger); }
+      .native-error { min-height: 16px; margin-top: 7px; color: var(--danger); }
+      .history { margin-top: 12px; }
+      .history h2 { margin: 0 0 9px; font-size: 14px; }
+      .history-card { overflow: hidden; }
+      .run { display: grid; grid-template-columns: 130px 1fr 110px 90px; gap: 12px; align-items: center; padding: 11px 13px; border-top: 1px solid var(--border); }
+      .run:first-child { border-top: 0; }
+      .run-name { font-family: ui-monospace, Consolas, monospace; }
+      .run-detail, .run-time { color: var(--muted); }
+      .badge { justify-self: start; padding: 3px 7px; border: 1px solid #345d4d; border-radius: 999px; background: #14251f; color: #6bd2a2; font-size: 10px; }
+      .badge.review { border-color: #5d5134; background: #272115; color: #e3bb61; }
+      @media (max-width: 1180px) {
+        .workspace-grid { grid-template-columns: 170px minmax(0, 1fr) minmax(0, 1fr); }
+        .page { padding-inline: 14px; }
+      }
     </style>
   </head>
   <body>
-    <main>
-      <h1>TAB-TEST</h1>
-      <p>Use the unpacked extension's <strong>Bulk files</strong> control for local tests.</p>
-      <div class="staged">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">T</span><span>Tacit Evals</span></div>
+      <div class="search"><input type="search" value="DEMO-204" aria-label="Issue search"><button class="button primary" type="button">Go</button></div>
+      <button class="button" type="button">Menu</button>
+      <span></span>
+      <div class="top-actions"><button class="compact-button" type="button">?</button><span class="account">Demo User</span><button class="compact-button" type="button">Sign out</button></div>
+    </header>
+    <main class="page">
+      <div class="issue-heading">
+        <h1>DEMO-204</h1>
+        <div class="taxonomy">Materials science · Evidence synthesis · File-assisted evaluation</div>
+      </div>
+
+      <section class="workspace-grid" aria-label="Evaluation workspace">
+        <aside class="rail">
+          <div class="rail-group">
+            <div class="rail-label">Issue actions</div>
+            <button type="button">Sync with Linear</button>
+          </div>
+          <div class="rail-group">
+            <div class="rail-label">Model</div>
+            <select aria-label="Model"><option>Evaluation model</option></select>
+            <button class="accent" type="button">Get an Answer</button>
+            <button type="button">Get a Score</button>
+          </div>
+          <div class="rail-group">
+            <div class="rail-label">Task analysis</div>
+            <button type="button">Question critique</button>
+            <button type="button">Rubric critique</button>
+            <button type="button">Check citations</button>
+            <button type="button">Compare runs</button>
+          </div>
+        </aside>
+
+        <article class="panel-card">
+          <div class="panel-header"><div><div class="panel-title">Question</div><div class="panel-meta">Saved locally for this demo</div></div><button class="compact-button" type="button">Edit</button></div>
+          <div class="panel-content">
+            <h2>Recommend a monitoring plan for a fictional composite curing line</h2>
+            <p>A laboratory is validating a new polymer composite process. Use the supplied fictional files to recommend a sensor layout and a short acceptance plan for the first three production trials.</p>
+            <p>Your answer must distinguish direct observations from assumptions. It must also explain how the team should respond if temperature drift and acoustic-emission counts disagree.</p>
+            <h3>Attached evidence</h3>
+            <p><span class="file-chip">demo_sensor_layout.csv</span> <span class="file-chip">demo_calibration_notes.txt</span></p>
+            <h3>Required output</h3>
+            <ul>
+              <li>A compact table of sensor locations, sampling rates, and alert limits.</li>
+              <li>A three-step acceptance sequence for each trial.</li>
+              <li>A short uncertainty note for every inferred threshold.</li>
+              <li>No claim that the fictional data represent a real facility.</li>
+            </ul>
+            <p>Keep the recommendation below 900 words and cite the staged filenames when evidence is used.</p>
+          </div>
+        </article>
+
+        <article class="panel-card">
+          <div class="panel-header"><div><div class="panel-title">Rubric</div><div class="panel-meta">10 criteria · 100 points</div></div><button class="compact-button" type="button">Edit</button></div>
+          <div class="panel-content">
+            <div class="criterion"><strong>1. Sensor coverage <span class="score">14 pts</span></strong>Places temperature and acoustic sensors at the three named fictional process zones.</div>
+            <div class="criterion"><strong>2. Sampling plan <span class="score">12 pts</span></strong>Gives a sampling rate and a reason for each signal type.</div>
+            <div class="criterion"><strong>3. Trial sequence <span class="score">12 pts</span></strong>Defines preparation, monitored cure, and post-cure review steps.</div>
+            <div class="criterion"><strong>4. Conflicting signals <span class="score">12 pts</span></strong>Explains a safe response when the two sensor families disagree.</div>
+            <div class="criterion"><strong>5. Evidence links <span class="score">10 pts</span></strong>Connects key decisions to the appropriate staged file.</div>
+            <div class="criterion"><strong>6. Uncertainty <span class="score">10 pts</span></strong>Marks assumed limits and does not present them as measured facts.</div>
+            <div class="criterion"><strong>7. Acceptance logic <span class="score">10 pts</span></strong>Uses clear pass, review, and stop conditions.</div>
+            <div class="criterion"><strong>8. Data quality <span class="score">8 pts</span></strong>Includes calibration and missing-data checks.</div>
+            <div class="criterion"><strong>9. Concision <span class="score">6 pts</span></strong>Uses the requested compact table and stays within the limit.</div>
+            <div class="criterion"><strong>10. Fiction boundary <span class="score">6 pts</span></strong>Does not imply that the demonstration data are real.</div>
+          </div>
+        </article>
+      </section>
+
+      <section class="staged">
         <div class="header">
           <strong style="font-size:13px">Staged files</strong>
-          <button class="add" type="button">Add file</button>
-          <input class="native-input" type="file" style="display:none">
+          <div class="header-actions"><button class="add compact-button" type="button">Add file</button><input class="native-input" type="file" style="display:none"></div>
         </div>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Mock staged-file panel for local verification.</div>
+        <div class="staged-copy">Files available to the current fictional evaluation task.</div>
         <table><tbody></tbody></table>
-        <div class="native-error" style="color:var(--danger)"></div>
-      </div>
+        <div class="native-error"></div>
+      </section>
+
+      <section class="history">
+        <h2>Run history</h2>
+        <div class="history-card">
+          <div class="run"><span class="run-name">demo-run-003</span><span class="run-detail">Evaluation model · answer and score</span><span class="badge review">Needs review</span><span class="run-time">8 min ago</span></div>
+          <div class="run"><span class="run-name">demo-run-002</span><span class="run-detail">Evaluation model · answer only</span><span class="badge">Complete</span><span class="run-time">32 min ago</span></div>
+          <div class="run"><span class="run-name">demo-run-001</span><span class="run-detail">Baseline model · answer and score</span><span class="badge">Complete</span><span class="run-time">Yesterday</span></div>
+        </div>
+      </section>
     </main>
     <script>
       (() => {
@@ -274,10 +483,20 @@
         });
 
         addButton.addEventListener('click', () => input.click());
-        addRow(new File(['alpha'], 'existing-alpha.txt', { type: 'text/plain' }));
-        addRow(new File(['beta'], 'existing-beta.csv', { type: 'text/csv' }));
-        addRow(new File(['gamma'], 'existing-gamma.json', { type: 'application/json' }));
-        addRow(new File(['delta'], 'existing-delta.md', { type: 'text/markdown' }));
+        const initialFiles = params.get('docs') === '1'
+          ? [
+              new File(['layout'], 'demo_sensor_layout.csv', { type: 'text/csv' }),
+              new File(['calibration'], 'demo_calibration_notes.txt', { type: 'text/plain' }),
+              new File(['summary'], 'demo_trial_summary.md', { type: 'text/markdown' }),
+              new File(['manifest'], 'demo_sample_manifest.json', { type: 'application/json' })
+            ]
+          : [
+              new File(['alpha'], 'existing-alpha.txt', { type: 'text/plain' }),
+              new File(['beta'], 'existing-beta.csv', { type: 'text/csv' }),
+              new File(['gamma'], 'existing-gamma.json', { type: 'application/json' }),
+              new File(['delta'], 'existing-delta.md', { type: 'text/markdown' })
+            ];
+        initialFiles.forEach(addRow);
         if (params.get('duplicateRows') === '1') {
           addRow(new File(['alpha'], 'existing-alpha.txt', { type: 'text/plain' }));
         }
