@@ -58,6 +58,20 @@ const wrongOperationStore = makeStore();
 const wrongOperationId = wrongOperationStore.create(uploadPlan(originalFile));
 assert.throws(() => wrongOperationStore.consume({ authorizationId: wrongOperationId, operation: "delete", names: ["planned.txt"] }), /did not match/i);
 
+const downloadRow = Object.freeze({ filename: "alpha.txt", sha256: "a".repeat(64), sizeText: "10 B" });
+const downloadStore = makeStore();
+const downloadId = downloadStore.create({
+  operation: "download",
+  requestedNames: ["alpha.txt"],
+  rows: [downloadRow],
+  actionableNames: ["alpha.txt"],
+  skipped: [],
+  inventory: inventory.map((row) => ({ ...row }))
+});
+const downloadPlan = downloadStore.consume({ authorizationId: downloadId, operation: "download", names: ["alpha.txt"] });
+assert.equal(downloadPlan.rows[0], downloadRow);
+assert.throws(() => downloadStore.consume({ authorizationId: downloadId, operation: "download", names: ["alpha.txt"] }), /already used|not found/i);
+
 const driftStore = makeStore();
 const driftId = driftStore.create(uploadPlan(originalFile));
 inventory = [{ filename: "changed.txt", sha256: "b".repeat(64), sizeText: "11 B" }];

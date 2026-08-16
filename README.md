@@ -7,7 +7,7 @@ Teal Eval Bulk Files adds reliable batch file controls to Tacit Teal eval issue 
 - a Codex skill that selects an open browser session and calls the CLI;
 - a complete local-only demonstration page and repeatable screenshot tests.
 
-Current release: `0.9.2`.
+Current release: `0.9.4`.
 
 ![Complete fictional eval page with the Bulk files control](docs/images/eval-page-overview.png)
 
@@ -19,7 +19,7 @@ Current release: `0.9.2`.
 - Select staged files with checkboxes before deletion.
 - Stop an upload after the current file or stop a deletion during its five-second delay.
 - Keep human Confirm/Cancel review inside the extension.
-- Let an authorized CLI plan apply without a visual confirmation click.
+- Let an authorized CLI plan apply without the extension confirmation dialog. A CLI download still opens one native Save As dialog.
 - Reject stale, mismatched, expired, ambiguous, or reused CLI plans.
 
 ## Install the extension
@@ -57,16 +57,38 @@ If the skill is not kept beside the repository's `extension` directory, set `TEA
 
 ## Use the CLI
 
-The CLI attaches to an already open Chrome or Edge session. It does not launch a browser, log in, or navigate.
+The CLI attaches to an already open browser session. It does not launch a browser, log in, or navigate. Select the exact browser or session first. The wrapper then requires exactly one transport: an explicit persistent stdio-proxy path, a current Chrome or Edge session, or an explicit loopback CDP endpoint.
 
-Enable the browser's protected local debugging bridge at `chrome://inspect/#remote-debugging` or `edge://inspect/#remote-debugging`. Then call the wrapper with the browser and exact issue ID:
+For a user-selected Chrome session with a configured persistent bridge, pass its absolute proxy path. The portable wrapper has no machine-specific default:
 
 ```powershell
-& .\skill\scripts\invoke-teal-cli.ps1 -Browser edge -Issue ABC-123 -Command status
-& .\skill\scripts\invoke-teal-cli.ps1 -Browser edge -Issue ABC-123 -Command list
+& .\skill\scripts\invoke-teal-cli.ps1 `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command status
 ```
 
-Uploads and deletions use two commands: `plan-*` returns a one-use token, and `apply-*` rechecks the exact plan before it starts. The user's requested plan is the CLI approval boundary. No extension dialog click is required.
+For direct current-session mode, enable the browser's protected local debugging bridge at `chrome://inspect/#remote-debugging` or `edge://inspect/#remote-debugging`. Then call the wrapper with the browser and exact issue ID:
+
+```powershell
+& .\skill\scripts\invoke-teal-cli.ps1 -Browser edge -Issue DEMO-204 -Command status
+& .\skill\scripts\invoke-teal-cli.ps1 -Browser edge -Issue DEMO-204 -Command list
+```
+
+Uploads, downloads, and deletions use two commands: `plan-*` returns a one-use token, and `apply-*` rechecks the exact plan before it starts. The user's requested plan is the CLI approval boundary. No extension confirmation click is required.
+
+For a download, pass exact staged filenames to `plan-download`, then pass only its token to `apply-download`:
+
+```powershell
+& .\skill\scripts\invoke-teal-cli.ps1 `
+  -Browser edge -Issue DEMO-204 -Command plan-download `
+  -Operands "evidence.csv","notes.txt"
+
+& .\skill\scripts\invoke-teal-cli.ps1 `
+  -Browser edge -Issue DEMO-204 -Command apply-download `
+  -Operands "<one-use-token>"
+```
+
+Apply creates one verified ZIP and opens exactly one native Save As dialog. The CLI does not accept an arbitrary absolute output path.
 
 ![Fictional CLI plan and apply example](docs/images/cli-plan-example.png)
 
@@ -75,10 +97,10 @@ See [CLI guide](docs/cli-guide.md) for browser selection, every command, JSON fi
 ## Safety model
 
 - The production extension runs only on `https://platform-teal-alpha.vercel.app/issue/*`.
-- The CLI accepts only loopback debugging connections.
+- The CLI accepts only an explicit local persistent-bridge path, a selected current browser session, or an explicit loopback debugging endpoint.
 - The CLI reads no cookies, passwords, browser history, or credential databases.
-- Upload and delete plans are bound to the issue, target tab, requested names, and staged inventory.
-- Human actions keep the extension's closed-shadow confirmation dialog.
+- Upload, download, and delete plans are bound to the exact issue, target tab, URL, page title, page generation, connection mode, requested names, and staged inventory.
+- Human upload and delete actions keep the extension's closed-shadow confirmation dialog. Human download uses the native Save As dialog.
 - CLI actions require the exact requested plan and two one-use authorization layers.
 - Real Teal issues are never used for mutation tests.
 

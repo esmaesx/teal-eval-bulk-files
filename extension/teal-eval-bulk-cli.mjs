@@ -1,14 +1,19 @@
 #!/usr/bin/env node
-// Node 24, dependency-free, local CDP client for the narrow isolated bridge.
+// Node 24, dependency-free client for the narrow Teal extension bridge.
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { PersistentBridgeClient } from "./persistent-mcp-client.mjs";
 
 const BRIDGE_GLOBAL = "__TEAL_EVAL_BULK_V09_BRIDGE__";
 const ISSUE_PATTERN = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/;
 const BRIDGE_AUTHORIZATION_PATTERN = /^[A-Za-z0-9-]{16,80}$/;
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
+const APPLY_UPLOAD_TIMEOUT_MS = 2 * 60 * 60 * 1000 + 10 * 60 * 1000;
+const APPLY_DOWNLOAD_TIMEOUT_MS = 2 * 60 * 60 * 1000 + 30 * 60 * 1000;
+const APPLY_DELETE_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_CDP_REQUEST_TIMEOUT_MS = 30_000;
 const EXIT_USAGE = 2;
 const EXIT_CONNECTION = 3;
 const EXIT_OPERATION = 4;
@@ -32,7 +37,7 @@ function parseArguments(argv) {
   const positional = [];
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
-    if (value === "--cdp" || value === "--browser" || value === "--user-data-dir" || value === "--issue" || value === "--state" || value === "--ttl-seconds") {
+    if (value === "--cdp" || value === "--browser" || value === "--persistent-bridge" || value === "--user-data-dir" || value === "--issue" || value === "--state" || value === "--ttl-seconds") {
       const next = argv[index + 1];
       if (!next || next.startsWith("--")) throw new Error(`Missing value for ${value}.`);
       options[value.slice(2)] = next;
@@ -44,11 +49,16 @@ function parseArguments(argv) {
     }
   }
   const command = positional.shift();
-  if (!command || !["status", "list", "plan-upload", "apply-upload", "plan-delete", "apply-delete", "stop"].includes(command)) {
-    throw new Error("Use one of: status, list, plan-upload, apply-upload, plan-delete, apply-delete, stop.");
+  if (!command || !["status", "list", "plan-upload", "apply-upload", "plan-download", "apply-download", "plan-delete", "apply-delete", "stop"].includes(command)) {
+    throw new Error("Use one of: status, list, plan-upload, apply-upload, plan-download, apply-download, plan-delete, apply-delete, stop.");
   }
+  if (["status", "list", "stop"].includes(command) && positional.length) throw new Error(`${command} does not accept operands.`);
+  if (["plan-upload", "plan-download", "plan-delete"].includes(command) && positional.length === 0) throw new Error(`${command} requires at least one file ${command === "plan-upload" ? "path" : "name"}.`);
+  if (["apply-upload", "apply-download", "apply-delete"].includes(command) && positional.length !== 1) throw new Error(`${command} requires exactly one plan token.`);
   if (!options.issue) throw new Error("--issue is required.");
-  if (Boolean(options.cdp) === Boolean(options.browser)) throw new Error("Use exactly one connection option: --cdp or --browser.");
+  const connectionCount = [options.cdp, options.browser, options["persistent-bridge"]].filter(Boolean).length;
+  if (connectionCount !== 1) throw new Error("Use exactly one connection option: --persistent-bridge, --cdp, or --browser.");
+  if (options["persistent-bridge"] && !isAbsolute(options["persistent-bridge"])) throw new Error("--persistent-bridge requires an absolute stdio proxy path.");
   if (options.browser && !["chrome", "edge"].includes(String(options.browser).toLowerCase())) throw new Error("--browser must be chrome or edge.");
   if (options["user-data-dir"] && !options.browser) throw new Error("--user-data-dir can be used only with --browser.");
   const issueIdentifier = String(options.issue).toUpperCase();
@@ -60,6 +70,7 @@ function parseArguments(argv) {
     operands: positional,
     cdp: options.cdp || "",
     browser: options.browser ? String(options.browser).toLowerCase() : "",
+    persistentBridge: options["persistent-bridge"] || "",
     userDataDir: options["user-data-dir"] || "",
     issueIdentifier,
     ttlMs: ttlSeconds * 1000,
@@ -98,6 +109,17 @@ function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+class CdpTransportError extends Error {
+  constructor(message, { requestDispatched = false, method = "", timeout = false } = {}) {
+    super(message);
+    this.name = "CdpTransportError";
+    this.transport = true;
+    this.requestDispatched = requestDispatched === true;
+    this.method = method;
+    this.timeout = timeout === true;
+  }
+}
+
 class CdpClient {
   constructor(socket) {
     this.socket = socket;
@@ -105,7 +127,8 @@ class CdpClient {
     this.pending = new Map();
     this.events = [];
     this.sessionId = null;
-    socket.addEventListener("message", (event) => {
+    this.closed = false;
+    this.handleMessage = (event) => {
       let message;
       try {
         message = JSON.parse(String(event.data));
@@ -116,39 +139,92 @@ class CdpClient {
         const pending = this.pending.get(message.id);
         if (!pending) return;
         this.pending.delete(message.id);
+        clearTimeout(pending.timer);
         if (message.error) pending.reject(new Error(`CDP ${message.error.code}: ${message.error.message}`));
         else pending.resolve(message.result);
       } else if (message.method) {
         this.events.push(message);
       }
-    });
+    };
+    this.handleClose = () => this.failPending("The local CDP WebSocket closed.");
+    this.handleError = () => this.failPending("The local CDP WebSocket failed after it opened.");
+    socket.addEventListener("message", this.handleMessage);
+    socket.addEventListener("close", this.handleClose);
+    socket.addEventListener("error", this.handleError);
   }
 
   static async connect(url, timeoutMs = 5000) {
     const socket = new WebSocket(url);
     await new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        socket.removeEventListener("open", onOpen);
+        socket.removeEventListener("error", onError);
+        socket.removeEventListener("close", onClose);
+      };
+      const finish = (callback) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        callback();
+      };
+      const onOpen = () => finish(resolve);
+      const onError = () => finish(() => reject(new Error("The local CDP WebSocket failed.")));
+      const onClose = () => finish(() => reject(new Error("The local CDP WebSocket closed before it opened.")));
       const timer = setTimeout(() => {
+        if (settled) return;
+        finish(() => reject(new Error("The local CDP WebSocket did not open.")));
         socket.close();
-        reject(new Error("The local CDP WebSocket did not open."));
       }, timeoutMs);
-      socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
-      socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("The local CDP WebSocket failed.")); }, { once: true });
+      socket.addEventListener("open", onOpen);
+      socket.addEventListener("error", onError);
+      socket.addEventListener("close", onClose);
     });
     return new CdpClient(socket);
   }
 
-  request(method, params = {}, sessionId = this.sessionId) {
+  failPending(message) {
+    if (this.closed) return;
+    this.closed = true;
+    for (const [id, pending] of this.pending) {
+      this.pending.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new CdpTransportError(message, { requestDispatched: pending.dispatched, method: pending.method }));
+    }
+  }
+
+  request(method, params = {}, sessionId = this.sessionId, timeoutMs = DEFAULT_CDP_REQUEST_TIMEOUT_MS) {
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) return Promise.reject(new Error("The CDP request timeout was invalid."));
+    if (this.closed || this.socket.readyState !== 1) {
+      return Promise.reject(new CdpTransportError("The local CDP WebSocket is not open.", { requestDispatched: false, method }));
+    }
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+      const pending = { resolve, reject, method, dispatched: false, timer: 0 };
+      pending.timer = setTimeout(() => {
+        if (this.pending.get(id) !== pending) return;
+        this.pending.delete(id);
+        reject(new CdpTransportError(`The CDP request timed out: ${method}.`, { requestDispatched: pending.dispatched, method, timeout: true }));
+      }, timeoutMs);
+      this.pending.set(id, pending);
+      try {
+        this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+        pending.dispatched = true;
+      } catch (error) {
+        this.pending.delete(id);
+        clearTimeout(pending.timer);
+        reject(new CdpTransportError(`The CDP request could not be sent: ${error instanceof Error ? error.message : String(error)}`, { requestDispatched: false, method }));
+      }
     });
   }
 
   close() {
-    for (const pending of this.pending.values()) pending.reject(new Error("The CDP connection closed."));
-    this.pending.clear();
-    this.socket.close();
+    if (!this.closed) this.failPending("The CDP connection closed.");
+    this.socket.removeEventListener("message", this.handleMessage);
+    this.socket.removeEventListener("close", this.handleClose);
+    this.socket.removeEventListener("error", this.handleError);
+    if (this.socket.readyState === 0 || this.socket.readyState === 1) this.socket.close();
   }
 }
 
@@ -242,7 +318,7 @@ async function findBridgeContext(client) {
   throw new Error("The isolated extension bridge was not found. Reload the unpacked extension and refresh the allowed issue tab.");
 }
 
-async function callBridge(client, contextId, command) {
+async function callBridge(client, contextId, command, timeoutMs = DEFAULT_CDP_REQUEST_TIMEOUT_MS) {
   const result = await client.request("Runtime.callFunctionOn", {
     executionContextId: contextId,
     functionDeclaration: `function(command) { const bridge = globalThis.${BRIDGE_GLOBAL}; if (!bridge || typeof bridge.command !== "function") throw new Error("The isolated extension bridge is unavailable."); return bridge.command(command); }`,
@@ -251,7 +327,7 @@ async function callBridge(client, contextId, command) {
     returnByValue: true,
     silent: true,
     userGesture: false
-  });
+  }, client.sessionId, timeoutMs);
   if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || "The isolated extension bridge rejected the command.");
   if (!Object.prototype.hasOwnProperty.call(result.result || {}, "value")) throw new Error("The isolated extension bridge returned no JSON value.");
   return result.result.value;
@@ -317,11 +393,18 @@ function validatePlanToken(record, { issueIdentifier, operation, targetId, now =
   if (record.consumed) throw new Error("The plan token was already used.");
   if (record.expiresAt <= now) throw new Error("The plan token expired.");
   if (record.issueIdentifier !== issueIdentifier || record.operation !== operation) throw new Error("The plan token is bound to a different issue or operation.");
-  if (record.targetId !== targetId) throw new Error("The plan token is bound to a different target tab.");
+  if (String(record.targetId) !== String(targetId)) throw new Error("The plan token is bound to a different target tab.");
+}
+
+function validatePlanConnection(record, client) {
+  if (record.targetUrl !== client.targetUrl) throw new Error("The plan token is bound to a different issue page URL.");
+  if ((record.connectionMode || "direct") !== (client.mode || "direct")) throw new Error("The plan token is bound to a different browser connection mode.");
+  if ((record.bridgeDocumentId || "") !== (client.documentId || "")) throw new Error("The issue page was refreshed after the plan token was created.");
+  if ((record.targetTitle || "") !== (client.targetTitle || "")) throw new Error("The issue page title changed after the plan token was created.");
 }
 
 function createApplyBridgeCommand(command, record) {
-  if (!["apply-upload", "apply-delete"].includes(command)) throw new Error("The apply command was invalid.");
+  if (!["apply-upload", "apply-download", "apply-delete"].includes(command)) throw new Error("The apply command was invalid.");
   if (!record || !Array.isArray(record.requestedNames) || !record.requestedNames.length) throw new Error("The saved plan file list was invalid.");
   if (!BRIDGE_AUTHORIZATION_PATTERN.test(record.bridgeAuthorizationId || "")) throw new Error("The saved CLI plan authorization was invalid.");
   return {
@@ -331,11 +414,41 @@ function createApplyBridgeCommand(command, record) {
   };
 }
 
+function normalizeIndeterminateApplyResult(cli, operation, record, token, result) {
+  const actionableNames = Array.isArray(record.actionableNames) && record.actionableNames.every((name) => typeof name === "string")
+    ? [...record.actionableNames]
+    : [...record.requestedNames];
+  const normalized = {
+    ok: false,
+    issueIdentifier: cli.issueIdentifier,
+    operation,
+    requestedNames: [...record.requestedNames],
+    actionableNames,
+    succeeded: [],
+    skipped: Array.isArray(record.skipped) ? record.skipped : [],
+    failed: [],
+    remaining: actionableNames,
+    indeterminate: true,
+    error: typeof result?.error === "string" && result.error
+      ? result.error
+      : "The apply dispatch is indeterminate and may still be running.",
+    token,
+    tokenConsumed: true
+  };
+  if (typeof result?.archiveFilename === "string") normalized.archiveFilename = result.archiveFilename;
+  if (Number.isInteger(result?.downloadId)) normalized.downloadId = result.downloadId;
+  return normalized;
+}
+
 async function createPlan(cli, client, contextId) {
-  const operation = cli.command === "plan-upload" ? "upload" : "delete";
-  const names = operation === "upload" ? await setUploadFiles(client, cli.operands) : cli.operands;
+  const operation = cli.command.slice("plan-".length);
+  const names = operation === "upload"
+    ? (client.mode === "persistent" ? await client.uploadFiles(cli.operands) : await setUploadFiles(client, cli.operands))
+    : cli.operands;
   if (!names.length) throw new Error(`${cli.command} requires at least one ${operation === "upload" ? "file path" : "filename"}.`);
-  const result = await callBridge(client, contextId, { command: cli.command, names });
+  const result = client.mode === "persistent"
+    ? (await client.callBridge({ command: cli.command, names }, { timeoutMs: 30_000 })).result
+    : await callBridge(client, contextId, { command: cli.command, names });
   if (!result?.ok) throw new Error(result?.error || "The controller could not create a plan.");
   if (!BRIDGE_AUTHORIZATION_PATTERN.test(result.authorizationId || "")) throw new Error("The controller returned no valid CLI plan authorization.");
   const { authorizationId, ...publicResult } = result;
@@ -348,7 +461,12 @@ async function createPlan(cli, client, contextId) {
     operation,
     targetId: client.targetId,
     targetUrl: client.targetUrl,
+    targetTitle: client.targetTitle || "",
+    connectionMode: client.mode || "direct",
+    bridgeDocumentId: client.documentId || "",
     requestedNames: [...names],
+    actionableNames: Array.isArray(publicResult.actionableNames) ? [...publicResult.actionableNames] : [],
+    skipped: Array.isArray(publicResult.skipped) ? publicResult.skipped : [],
     bridgeAuthorizationId: authorizationId,
     inventory,
     issuedAt: now,
@@ -360,22 +478,54 @@ async function createPlan(cli, client, contextId) {
 }
 
 async function applyPlan(cli, client, contextId) {
-  const operation = cli.command === "apply-upload" ? "upload" : "delete";
+  const operation = cli.command.slice("apply-".length);
   if (cli.operands.length !== 1) throw new Error(`${cli.command} requires exactly one plan token.`);
   const state = await loadState(cli.statePath);
   const token = cli.operands[0];
   const record = state.tokens[token];
   const now = Date.now();
   validatePlanToken(record, { issueIdentifier: cli.issueIdentifier, operation, targetId: client.targetId, now });
-  const listed = await callBridge(client, contextId, { command: "list" });
+  validatePlanConnection(record, client);
+  const listed = client.mode === "persistent"
+    ? (await client.callBridge({ command: "list" }, { timeoutMs: 30_000 })).result
+    : await callBridge(client, contextId, { command: "list" });
   if (!listed?.ok) throw new Error(listed?.error || "The controller did not return the current inventory.");
   if (JSON.stringify(canonicalInventory(listed.inventory)) !== JSON.stringify(record.inventory)) throw new Error("The staged-file inventory changed after planning. No mutation was started.");
   record.consumed = true;
   record.consumedAt = now;
   await saveState(cli.statePath, state);
-  const result = await callBridge(client, contextId, createApplyBridgeCommand(cli.command, record));
-  if (!result?.ok) throw new Error(result?.error || "The controller rejected the apply command.");
+  const applyTimeoutMs = cli.command === "apply-upload"
+    ? APPLY_UPLOAD_TIMEOUT_MS
+    : cli.command === "apply-download" ? APPLY_DOWNLOAD_TIMEOUT_MS : APPLY_DELETE_TIMEOUT_MS;
+  let result;
+  try {
+    result = client.mode === "persistent"
+      ? (await client.callBridge(createApplyBridgeCommand(cli.command, record), { timeoutMs: applyTimeoutMs })).result
+      : await callBridge(client, contextId, createApplyBridgeCommand(cli.command, record), applyTimeoutMs);
+  } catch (error) {
+    if (client.mode !== "persistent" && error?.transport === true && error?.requestDispatched === true) {
+      return normalizeIndeterminateApplyResult(cli, operation, record, token, {
+        error: `The direct apply dispatch is indeterminate and may still be running. ${error instanceof Error ? error.message : String(error)}`
+      });
+    }
+    throw error;
+  }
+  if (result?.indeterminate === true) return normalizeIndeterminateApplyResult(cli, operation, record, token, result);
+  if (!result?.ok && result?.indeterminate !== true) throw new Error(result?.error || "The controller rejected the apply command.");
   return { ...result, token, tokenConsumed: true };
+}
+
+function classifyCommandResult(command, issueIdentifier, result) {
+  const failed = Array.isArray(result?.failed) && result.failed.length > 0;
+  const cancelled = result?.cancelled === true;
+  const indeterminate = result?.indeterminate === true;
+  const output = {
+    command,
+    issueIdentifier,
+    ...result,
+    ok: result?.ok !== false && !failed && !cancelled && !indeterminate
+  };
+  return { output, exitCode: output.ok ? 0 : EXIT_OPERATION };
 }
 
 async function run() {
@@ -389,29 +539,36 @@ async function run() {
   let client;
   try {
     try {
-      client = cli.browser
+      if (cli.persistentBridge) client = await new PersistentBridgeClient(cli.persistentBridge, cli.issueIdentifier).attach();
+      else client = cli.browser
         ? await attachToBrowserIssue(cli.browser, cli.userDataDir, cli.issueIdentifier)
         : await attachToExistingIssue(cli.cdp, cli.issueIdentifier);
+      client.mode ||= "direct";
     } catch (error) {
       error.exitCode = EXIT_CONNECTION;
       throw error;
     }
-    const contextId = await findBridgeContext(client);
+    const contextId = client.mode === "persistent" ? null : await findBridgeContext(client);
     let result;
-    if (cli.command === "plan-upload" || cli.command === "plan-delete") result = await createPlan(cli, client, contextId);
-    else if (cli.command === "apply-upload" || cli.command === "apply-delete") result = await applyPlan(cli, client, contextId);
-    else result = await callBridge(client, contextId, { command: cli.command });
-    const failed = Array.isArray(result?.failed) && result.failed.length > 0;
-    const cancelled = result?.cancelled === true;
-    printJson({ ok: result?.ok !== false && !failed && !cancelled, command: cli.command, issueIdentifier: cli.issueIdentifier, ...result });
-    if (failed || cancelled || result?.ok === false) process.exitCode = EXIT_OPERATION;
+    if (["plan-upload", "plan-download", "plan-delete"].includes(cli.command)) result = await createPlan(cli, client, contextId);
+    else if (["apply-upload", "apply-download", "apply-delete"].includes(cli.command)) result = await applyPlan(cli, client, contextId);
+    else result = client.mode === "persistent"
+      ? (await client.callBridge({ command: cli.command }, { timeoutMs: 30_000 })).result
+      : await callBridge(client, contextId, { command: cli.command });
+    const outcome = classifyCommandResult(cli.command, cli.issueIdentifier, result);
+    printJson(outcome.output);
+    if (outcome.exitCode) process.exitCode = outcome.exitCode;
   } finally {
-    client?.close();
+    await client?.close?.();
   }
 }
 
-export { browserSetupUrl, canonicalInventory, createApplyBridgeCommand, createToken, defaultUserDataDir, parseArguments, readBrowserWebSocketEndpoint, validateLoopbackCdp, validatePlanToken };
+export { CdpClient, CdpTransportError, applyPlan, browserSetupUrl, canonicalInventory, classifyCommandResult, createApplyBridgeCommand, createToken, defaultUserDataDir, parseArguments, readBrowserWebSocketEndpoint, validateLoopbackCdp, validatePlanConnection, validatePlanToken };
 
 if (import.meta.main) {
-  run().catch((error) => fail(error instanceof Error ? error.message : String(error), error?.exitCode || EXIT_OPERATION));
+  run().catch((error) => fail(
+    error instanceof Error ? error.message : String(error),
+    error?.exitCode || EXIT_OPERATION,
+    error?.indeterminate === true ? { indeterminate: true } : {}
+  ));
 }

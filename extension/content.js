@@ -18,6 +18,7 @@
   const DOWNLOAD_LIST_READY_TIMEOUT_MS = 15_000;
   const DOWNLOAD_BRIDGE_TIMEOUT_MS = 5_000;
   const DOWNLOAD_SAVE_AS_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+  const INDETERMINATE_BLOB_RETENTION_MS = 15 * 60 * 1000;
   const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
   const MAX_ARCHIVE_FILE_BYTES = 256 * 1024 * 1024;
   const SAVE_ZIP_MESSAGE = "teal-eval-bulk-save-zip-v1";
@@ -28,6 +29,15 @@
   const BRIDGE_GLOBAL = "__TEAL_EVAL_BULK_V09_BRIDGE__";
   const BRIDGE_PLAN_TTL_MS = 60 * 60 * 1000;
   const BRIDGE_AUTHORIZATION_PATTERN = /^[A-Za-z0-9-]{16,80}$/;
+  const PERSISTENT_BRIDGE_PROTOCOL_VERSION = 1;
+  const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.4";
+  const PERSISTENT_BRIDGE_REQUEST_PATTERN = /^[A-Za-z0-9_-]{16,80}$/;
+  const PERSISTENT_BRIDGE_UPLOAD_TTL_MS = 5 * 60 * 1000;
+  const PERSISTENT_BRIDGE_RESULT_TTL_MS = 15 * 60 * 1000;
+  const PERSISTENT_BRIDGE_MAX_REQUESTS = 4096;
+  const PERSISTENT_BRIDGE_MAX_RESULT_BYTES = 512 * 1024;
+  const PERSISTENT_BRIDGE_RESULT_PREFIX = "TEAL_CLI_RESULT_";
+  const PERSISTENT_BRIDGE_ACK_PREFIX = "TEAL_CLI_ACK_";
 
   if (document.getElementById(HOST_ID)) {
     return;
@@ -300,6 +310,32 @@
       .confirm-list { margin: 0; padding: 10px 12px 10px 28px; overflow: auto; border: 1px solid var(--eval-border); border-radius: 7px; background: var(--eval-bg); font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
       .confirm-list li { overflow-wrap: anywhere; }
       .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+      .cli-bridge-surface {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 2px;
+        height: 2px;
+        overflow: hidden;
+        opacity: 0.001;
+        pointer-events: none;
+      }
+      .cli-bridge-surface input[type="file"],
+      .cli-bridge-surface textarea,
+      .cli-bridge-surface output {
+        display: block;
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        min-width: 1px;
+        min-height: 1px;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+      }
+      .cli-bridge-surface textarea { top: 1px; resize: none; }
+      .cli-bridge-results { position: absolute; top: 0; left: 1px; width: 1px; height: 1px; overflow: hidden; }
       @media (max-height: 600px) {
         .backdrop { padding: 8px; }
         .dialog { height: calc(100vh - 16px); }
@@ -419,6 +455,11 @@
         </div>
       </section>
     </div>
+    <section class="cli-bridge-surface" aria-label="Teal CLI persistent bridge" tabindex="-1">
+      <input class="cli-bridge-upload" type="file" aria-label="Teal CLI persistent upload" tabindex="-1">
+      <textarea class="cli-bridge-command" maxlength="262144" aria-label="Teal CLI persistent command" tabindex="-1"></textarea>
+      <div class="cli-bridge-results" aria-label="Teal CLI persistent results"></div>
+    </section>
   `;
 
   const ui = {
@@ -450,7 +491,10 @@
     confirmCopy: shadow.querySelector(".confirm-copy"),
     confirmList: shadow.querySelector(".confirm-list"),
     confirmCancel: shadow.querySelector(".confirm-cancel"),
-    confirmApply: shadow.querySelector(".confirm-apply")
+    confirmApply: shadow.querySelector(".confirm-apply"),
+    bridgeUploadInput: shadow.querySelector(".cli-bridge-upload"),
+    bridgeCommandInput: shadow.querySelector(".cli-bridge-command"),
+    bridgeResults: shadow.querySelector(".cli-bridge-results")
   };
 
   let busy = false;
@@ -465,7 +509,12 @@
   let dragDepth = 0;
   let pendingConfirmation = null;
   let activeOperation = "";
+  let bridgeUploadSelectionActive = false;
+  let bridgeUploadSelectionTimer = 0;
+  const bridgeDocumentId = createBridgeAuthorizationId();
+  const persistentBridgeRequests = new Map();
   const pendingZipRequests = new Map();
+  const retainedIndeterminateBlobUrls = new Map();
   const bridgePlanStore = globalThis.TealEvalBridgePlanStore.createStore({
     ttlMs: BRIDGE_PLAN_TTL_MS,
     authorizationPattern: BRIDGE_AUTHORIZATION_PATTERN,
@@ -1099,6 +1148,30 @@
     return `${issueIdentifier}-staged-files-${date}.zip`;
   }
 
+  function indeterminateDownloadError(message, downloadId) {
+    const error = new Error(message);
+    error.indeterminate = true;
+    if (Number.isInteger(downloadId)) error.downloadId = downloadId;
+    return error;
+  }
+
+  function revokeRetainedBlobUrl(blobUrl) {
+    const timer = retainedIndeterminateBlobUrls.get(blobUrl);
+    if (timer) window.clearTimeout(timer);
+    retainedIndeterminateBlobUrls.delete(blobUrl);
+    URL.revokeObjectURL(blobUrl);
+  }
+
+  function retainIndeterminateBlobUrl(blobUrl) {
+    if (!blobUrl || retainedIndeterminateBlobUrls.has(blobUrl)) return;
+    const timer = window.setTimeout(() => revokeRetainedBlobUrl(blobUrl), INDETERMINATE_BLOB_RETENTION_MS);
+    retainedIndeterminateBlobUrls.set(blobUrl, timer);
+  }
+
+  function revokeAllRetainedBlobUrls() {
+    for (const blobUrl of [...retainedIndeterminateBlobUrls.keys()]) revokeRetainedBlobUrl(blobUrl);
+  }
+
   function requestEdgeSaveAs({ batchId, entries, archiveFilename, blobUrl }) {
     const requestId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
@@ -1106,10 +1179,16 @@
 
     return new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
+        const pending = pendingZipRequests.get(requestId);
         pendingZipRequests.delete(requestId);
-        reject(new Error(`The Edge Save As dialog timed out for ${archiveFilename}.`));
+        reject(indeterminateDownloadError(
+          pending?.started
+            ? `The browser started the Save As request for ${archiveFilename}, but did not report its final state.`
+            : `The Save As request for ${archiveFilename} timed out without a confirmed final state.`,
+          pending?.downloadId
+        ));
       }, DOWNLOAD_SAVE_AS_TIMEOUT_MS);
-      pendingZipRequests.set(requestId, { resolve, reject, timer });
+      pendingZipRequests.set(requestId, { resolve, reject, timer, started: false, downloadId: null });
       chrome.runtime.sendMessage({
         type: SAVE_ZIP_MESSAGE,
         requestId,
@@ -1120,18 +1199,32 @@
         archiveFilename,
         blobUrl
       }).then((response) => {
-        if (response?.ok === true && response.started === true) return;
         const pending = pendingZipRequests.get(requestId);
         if (!pending) return;
+        if (response?.ok === true && response.started === true) {
+          pending.started = true;
+          pending.downloadId = Number.isInteger(response.downloadId) ? response.downloadId : null;
+          return;
+        }
         window.clearTimeout(pending.timer);
         pendingZipRequests.delete(requestId);
-        pending.reject(new Error(response?.error || `Edge did not start the Save As dialog for ${archiveFilename}.`));
+        if (response?.indeterminate === true || response?.started === true) {
+          pending.reject(indeterminateDownloadError(
+            response?.error || `The browser may have started the Save As request for ${archiveFilename}, but its state was not confirmed.`,
+            response?.downloadId
+          ));
+        } else {
+          pending.reject(new Error(response?.error || `Edge did not start the Save As dialog for ${archiveFilename}.`));
+        }
       }).catch((error) => {
         const pending = pendingZipRequests.get(requestId);
         if (!pending) return;
         window.clearTimeout(pending.timer);
         pendingZipRequests.delete(requestId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        pending.reject(indeterminateDownloadError(
+          `The Save As request lost contact with the extension after dispatch. ${error instanceof Error ? error.message : String(error)}`,
+          pending.downloadId
+        ));
       });
     });
   }
@@ -1154,20 +1247,32 @@
     throw new Error(`The staged-file list did not become ready before downloading ${expected.filename}.`);
   }
 
-  async function startDownload() {
-    if (busy || !selectedDownloadKeys.size) return;
+  async function startDownload(options = {}) {
+    const plannedRows = Array.isArray(options.rows) ? options.rows : null;
+    const requestedNames = plannedRows ? plannedRows.map((row) => row.filename) : [];
+    if (busy) {
+      return { operation: "download", succeeded: [], skipped: [], failed: [{ name: "", error: "A bulk operation is already running." }], remaining: requestedNames };
+    }
+    if (!plannedRows && !selectedDownloadKeys.size) return;
     refreshRows();
 
-    const selected = stagedRows.filter((row) => selectedDownloadKeys.has(rowKey(row)));
-    if (selected.length !== selectedDownloadKeys.size) {
+    const selected = plannedRows
+      ? plannedRows.filter((row) => stagedRows.some((current) => rowKey(current) === rowKey(row)))
+      : stagedRows.filter((row) => selectedDownloadKeys.has(rowKey(row)));
+    const expectedCount = plannedRows ? plannedRows.length : selectedDownloadKeys.size;
+    const selectedNames = selected.map((row) => row.filename);
+    if (selected.length !== expectedCount) {
+      const error = "The staged-file list changed.";
       setStatus("The staged-file list changed. Review the refreshed selection before download.", "error");
-      return;
+      return { operation: "download", succeeded: [], skipped: [], failed: [{ name: "", error }], remaining: plannedRows ? requestedNames : selectedNames };
     }
 
     setBusy(true);
     activeOperation = "download";
     stopAfterCurrent = false;
     let blobUrl = "";
+    let archiveFilename = "";
+    let failureTarget = selectedNames[0] || "";
     const batchId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
@@ -1175,11 +1280,12 @@
     try {
       const apiRows = await fetchDownloadApiRows();
       const queue = selected.map((row) => {
+        failureTarget = row.filename;
         const matches = apiRows.filter((apiRow) =>
           typeof apiRow === "object" && apiRow !== null &&
           typeof apiRow.id !== "undefined" &&
           apiRow.filename === row.filename &&
-          (apiRow.sha256 || "") === (row.sha256 || "")
+          String(apiRow.sha256 || "").toLowerCase() === String(row.sha256 || "").toLowerCase()
         );
         if (matches.length !== 1) {
           throw new Error(`The staged-file API could not identify exactly one copy of ${row.filename}.`);
@@ -1195,10 +1301,8 @@
         return { row, apiRow, byteSize };
       });
       if (queue.length > 500) throw new Error("Select 500 or fewer files for one ZIP.");
-      const advertisedBytes = queue.reduce((total, { byteSize }) => {
-        return total + byteSize;
-      }, 0);
-      if (advertisedBytes > MAX_ARCHIVE_BYTES) {
+      const advertisedBytes = queue.reduce((total, { byteSize }) => total + byteSize, 0);
+      if (!Number.isSafeInteger(advertisedBytes) || advertisedBytes > MAX_ARCHIVE_BYTES) {
         throw new Error("The selected files are too large for one browser-built ZIP. Select fewer files.");
       }
 
@@ -1211,13 +1315,14 @@
         archiveNames.add(nameKey);
       }
 
-      if (!globalThis.TealEvalZip?.build) {
+      if (!globalThis.TealEvalZip?.build || !globalThis.TealEvalZip?.sha256) {
         throw new Error("The ZIP builder did not load. Reload the extension and refresh this page.");
       }
 
       const archiveFiles = [];
       let totalBytes = 0;
       for (const [index, { row, apiRow, byteSize }] of queue.entries()) {
+        failureTarget = row.filename;
         await waitForDownloadTarget(row);
         setStatus(`Reading ${index + 1} of ${queue.length} for the ZIP: ${row.filename}`);
         const signedUrl = await fetchSignedDownloadUrl(apiRow.id);
@@ -1232,18 +1337,14 @@
         const blob = await readArchiveSource(fileResponse, byteSize, row.filename, totalBytes);
         setStatus(`Verifying ${index + 1} of ${queue.length} for the ZIP: ${row.filename}`);
         const downloadedSha256 = await globalThis.TealEvalZip.sha256(blob);
-        if (downloadedSha256 !== (row.sha256 || "").toLowerCase()) {
+        if (downloadedSha256 !== String(row.sha256 || "").toLowerCase()) {
           throw new Error(`The SHA-256 value changed for ${row.filename}. No ZIP was saved.`);
         }
         totalBytes += blob.size;
-        archiveFiles.push({
-          name: row.filename,
-          blob,
-          lastModified: Date.now()
-        });
+        archiveFiles.push({ name: row.filename, blob, lastModified: Date.now() });
         if (stopAfterCurrent) {
           setStatus(`Stopped while preparing the ZIP after ${index + 1} of ${queue.length} files. No ZIP was saved, and all files remain selected.`, "success");
-          return;
+          return { operation: "download", cancelled: true, succeeded: [], skipped: [], failed: [], remaining: selectedNames };
         }
       }
 
@@ -1253,10 +1354,11 @@
           setStatus(`Building ZIP entry ${fileIndex + 1} of ${fileCount}: ${name}`);
         }
       });
-      const archiveFilename = makeArchiveFilename();
+      archiveFilename = makeArchiveFilename();
+      failureTarget = archiveFilename;
       blobUrl = URL.createObjectURL(archiveBlob);
       setStatus(`Waiting for one Edge Save As dialog for ${archiveFilename}`);
-      await requestEdgeSaveAs({
+      const downloadId = await requestEdgeSaveAs({
         batchId,
         entries: queue.map(({ row, apiRow }) => ({
           stagedId: String(apiRow.id),
@@ -1269,8 +1371,42 @@
       for (const { row } of queue) selectedDownloadKeys.delete(rowKey(row));
       renderDownloadRows();
       setStatus(`Saved one ZIP with ${queue.length} file${queue.length === 1 ? "" : "s"}.`, "success");
+      return {
+        operation: "download",
+        succeeded: selectedNames,
+        skipped: [],
+        failed: [],
+        remaining: [],
+        archiveFilename,
+        downloadId
+      };
     } catch (error) {
-      setStatus(`The ZIP was not saved. All selected files remain selected.\n${error instanceof Error ? error.message : String(error)}`, "error");
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (error?.indeterminate === true) {
+        retainIndeterminateBlobUrl(blobUrl);
+        blobUrl = "";
+        setStatus(`The browser may have started saving ${archiveFilename || "the ZIP"}, but its final state was not confirmed. Check browser Downloads before you retry. All selected files remain selected.`, "error");
+        return {
+          ok: false,
+          operation: "download",
+          indeterminate: true,
+          error: errorMessage,
+          succeeded: [],
+          skipped: [],
+          failed: [],
+          remaining: selectedNames,
+          ...(archiveFilename ? { archiveFilename } : {}),
+          ...(Number.isInteger(error?.downloadId) ? { downloadId: error.downloadId } : {})
+        };
+      }
+      setStatus(`The ZIP was not saved. All selected files remain selected.\n${errorMessage}`, "error");
+      return {
+        operation: "download",
+        succeeded: [],
+        skipped: [],
+        failed: [{ name: failureTarget, error: errorMessage }],
+        remaining: selectedNames
+      };
     } finally {
       if (blobUrl) URL.revokeObjectURL(blobUrl);
       setBusy(false);
@@ -1474,6 +1610,150 @@
     return [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
   }
 
+  function isPlainBridgeObject(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const prototype = Object.getPrototypeOf(value);
+    return prototype === Object.prototype || prototype === null;
+  }
+
+  function hasExactBridgeKeys(value, expected) {
+    if (!isPlainBridgeObject(value)) return false;
+    const actual = Object.keys(value).sort();
+    const wanted = [...expected].sort();
+    return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
+  }
+
+  function bridgeCommandKeys(command) {
+    if (["capabilities", "status", "list", "prepare-upload", "cancel-upload", "stop"].includes(command)) return ["command"];
+    if (["plan-upload", "plan-download", "plan-delete"].includes(command)) return ["command", "names"];
+    if (["apply-upload", "apply-download", "apply-delete"].includes(command)) return ["authorizationId", "command", "names"];
+    return [];
+  }
+
+  function clearBridgeUploadSelection({ clearFiles = true } = {}) {
+    if (bridgeUploadSelectionTimer) window.clearTimeout(bridgeUploadSelectionTimer);
+    bridgeUploadSelectionTimer = 0;
+    bridgeUploadSelectionActive = false;
+    ui.bridgeUploadInput.value = "";
+    if (clearFiles) {
+      selectedUploads = [];
+      renderUploadFiles();
+    }
+  }
+
+  function armBridgeUploadSelectionTimer() {
+    if (bridgeUploadSelectionTimer) window.clearTimeout(bridgeUploadSelectionTimer);
+    bridgeUploadSelectionTimer = window.setTimeout(() => clearBridgeUploadSelection(), PERSISTENT_BRIDGE_UPLOAD_TTL_MS);
+  }
+
+  function prepareBridgeUploadSelection() {
+    if (busy) throw new Error("A bulk operation is already running.");
+    clearBridgeUploadSelection();
+    bridgeUploadSelectionActive = true;
+    armBridgeUploadSelectionTimer();
+    return Date.now() + PERSISTENT_BRIDGE_UPLOAD_TTL_MS;
+  }
+
+  function encodePersistentBridgeResult(value) {
+    const json = JSON.stringify(value);
+    const bytes = new TextEncoder().encode(json);
+    if (bytes.byteLength > PERSISTENT_BRIDGE_MAX_RESULT_BYTES) throw new Error("The persistent bridge result was too large.");
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
+  }
+
+  function appendPersistentBridgeMarker(marker, kind) {
+    const node = document.createElement("output");
+    node.className = `cli-bridge-${kind}`;
+    node.setAttribute("aria-label", marker);
+    node.textContent = marker;
+    ui.bridgeResults.appendChild(node);
+    return node;
+  }
+
+  function emitPersistentBridgeResult(requestId, commandName, state, value) {
+    const base = {
+      protocolVersion: PERSISTENT_BRIDGE_PROTOCOL_VERSION,
+      extensionVersion: PERSISTENT_BRIDGE_EXTENSION_VERSION,
+      documentId: bridgeDocumentId,
+      requestId,
+      targetUrl: window.location.href,
+      command: commandName || "unknown",
+      state
+    };
+    let payload = state === "completed" ? { ...base, result: value } : { ...base, error: String(value || "The persistent bridge command failed.").slice(0, 2_000) };
+    let encoded;
+    try {
+      encoded = encodePersistentBridgeResult(payload);
+    } catch {
+      payload = { ...base, state: "failed", error: "The persistent bridge result was too large." };
+      encoded = encodePersistentBridgeResult(payload);
+    }
+    const readyNode = appendPersistentBridgeMarker(`${PERSISTENT_BRIDGE_RESULT_PREFIX}${requestId}`, "ready");
+    const marker = `${PERSISTENT_BRIDGE_RESULT_PREFIX}${requestId}:${encoded}`;
+    const node = appendPersistentBridgeMarker(marker, "result");
+    const record = persistentBridgeRequests.get(requestId);
+    if (record) {
+      record.state = payload.state;
+      record.resultNode = node;
+    }
+    window.setTimeout(() => {
+      readyNode.remove();
+      node.remove();
+      if (record) record.resultNode = null;
+    }, PERSISTENT_BRIDGE_RESULT_TTL_MS);
+  }
+
+  function validatePersistentBridgeEnvelope(value) {
+    if (!hasExactBridgeKeys(value, ["protocolVersion", "requestId", "documentId", "targetUrl", "command"])) {
+      throw new Error("The persistent bridge request contained unsupported fields.");
+    }
+    if (value.protocolVersion !== PERSISTENT_BRIDGE_PROTOCOL_VERSION) throw new Error("The persistent bridge protocol version did not match.");
+    if (value.targetUrl !== window.location.href) throw new Error("The persistent bridge request was bound to a different page.");
+    if (!isPlainBridgeObject(value.command)) throw new Error("The persistent bridge command was invalid.");
+    const keys = bridgeCommandKeys(value.command.command);
+    if (!keys.length || !hasExactBridgeKeys(value.command, keys)) throw new Error("The persistent bridge command contained unsupported fields.");
+    if (value.command.command === "capabilities") {
+      if (value.documentId !== "") throw new Error("The initial capability request used an unexpected document identifier.");
+    } else if (value.documentId !== bridgeDocumentId) {
+      throw new Error("The persistent bridge document identifier did not match this page generation.");
+    }
+    return value.command;
+  }
+
+  function processPersistentBridgeInput() {
+    const raw = ui.bridgeCommandInput.value;
+    if (!raw) return;
+    ui.bridgeCommandInput.value = "";
+    ui.bridgeCommandInput.blur();
+    let envelope;
+    try {
+      envelope = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const requestId = envelope?.requestId;
+    if (!PERSISTENT_BRIDGE_REQUEST_PATTERN.test(requestId || "")) return;
+    if (persistentBridgeRequests.has(requestId)) return;
+    if (persistentBridgeRequests.size >= PERSISTENT_BRIDGE_MAX_REQUESTS) return;
+    persistentBridgeRequests.set(requestId, { createdAt: Date.now(), state: "pending", resultNode: null });
+    const ackNode = appendPersistentBridgeMarker(`${PERSISTENT_BRIDGE_ACK_PREFIX}${requestId}`, "ack");
+    window.setTimeout(() => ackNode.remove(), PERSISTENT_BRIDGE_RESULT_TTL_MS);
+    let command;
+    try {
+      command = validatePersistentBridgeEnvelope(envelope);
+    } catch (error) {
+      emitPersistentBridgeResult(requestId, envelope?.command?.command, "failed", error instanceof Error ? error.message : String(error));
+      return;
+    }
+    Promise.resolve(sendNarrowBridgeCommand(command))
+      .then((result) => emitPersistentBridgeResult(requestId, command.command, "completed", result))
+      .catch((error) => emitPersistentBridgeResult(requestId, command.command, "failed", error instanceof Error ? error.message : String(error)));
+  }
+
   function planUploadFromNames(names) {
     const requestedNames = parseBridgeNames(names);
     const usedNames = new Set();
@@ -1535,6 +1815,37 @@
     };
   }
 
+  function planDownloadFromNames(names) {
+    const requestedNames = parseBridgeNames(names);
+    const usedNames = new Set();
+    const rows = [];
+    const skipped = [];
+    refreshRows();
+    for (const name of requestedNames) {
+      if (usedNames.has(name)) {
+        skipped.push({ name, reason: "duplicate requested name" });
+        continue;
+      }
+      usedNames.add(name);
+      const matches = stagedRows.filter((row) => row.filename === name);
+      if (matches.length === 0) {
+        skipped.push({ name, reason: "not staged" });
+      } else if (matches.length !== 1 || ambiguousRowKeys.has(rowKey(matches[0]))) {
+        skipped.push({ name, reason: "ambiguous staged row" });
+      } else {
+        rows.push(matches[0]);
+      }
+    }
+    return {
+      operation: "download",
+      requestedNames,
+      rows,
+      actionableNames: rows.map((row) => row.filename),
+      skipped,
+      inventory: publicInventory()
+    };
+  }
+
   function publicPlan(plan) {
     return {
       ok: true,
@@ -1552,18 +1863,45 @@
       throw new Error("The command issue identifier did not match this page.");
     }
     if (!Object.prototype.hasOwnProperty.call(command, "command")) throw new Error("The command was missing.");
+    if (command.command === "capabilities") {
+      return {
+        ok: true,
+        issueIdentifier,
+        persistentBridgeProtocolVersion: PERSISTENT_BRIDGE_PROTOCOL_VERSION,
+        extensionVersion: PERSISTENT_BRIDGE_EXTENSION_VERSION,
+        documentId: bridgeDocumentId,
+        targetUrl: window.location.href
+      };
+    }
     if (command.command === "status") {
       return { ok: true, issueIdentifier, busy, activeOperation };
     }
     if (command.command === "list") {
       return { ok: true, issueIdentifier, inventory: publicInventory() };
     }
+    if (command.command === "prepare-upload") {
+      const expiresAt = prepareBridgeUploadSelection();
+      return { ok: true, issueIdentifier, expiresAt };
+    }
+    if (command.command === "cancel-upload") {
+      clearBridgeUploadSelection();
+      return { ok: true, issueIdentifier, cancelled: true };
+    }
     if (command.command === "plan-upload") {
-      const plan = planUploadFromNames(command.names);
-      return { ...publicPlan(plan), authorizationId: bridgePlanStore.create(plan) };
+      try {
+        if (!bridgeUploadSelectionActive) throw new Error("The persistent upload selection was not prepared or expired.");
+        const plan = planUploadFromNames(command.names);
+        return { ...publicPlan(plan), authorizationId: bridgePlanStore.create(plan) };
+      } finally {
+        clearBridgeUploadSelection();
+      }
     }
     if (command.command === "plan-delete") {
       const plan = planDeleteFromNames(command.names);
+      return { ...publicPlan(plan), authorizationId: bridgePlanStore.create(plan) };
+    }
+    if (command.command === "plan-download") {
+      const plan = planDownloadFromNames(command.names);
       return { ...publicPlan(plan), authorizationId: bridgePlanStore.create(plan) };
     }
     if (command.command === "apply-upload") {
@@ -1578,6 +1916,12 @@
       const result = await startDelete({ rows: plan.rows, fromBridge: true });
       return { ...publicPlan(plan), ...result, skipped: [...plan.skipped, ...(result?.skipped || [])] };
     }
+    if (command.command === "apply-download") {
+      const plan = bridgePlanStore.consume({ authorizationId: command.authorizationId, operation: "download", names: command.names });
+      if (!plan.rows.length) return { ...publicPlan(plan), succeeded: [], failed: [], remaining: [] };
+      const result = await startDownload({ rows: plan.rows, fromBridge: true });
+      return { ...publicPlan(plan), ...result, skipped: [...plan.skipped, ...(result?.skipped || [])] };
+    }
     if (command.command === "stop") {
       if (activeOperation === "delete") deleteStopRequested = true;
       else stopAfterCurrent = true;
@@ -1587,12 +1931,9 @@
   }
 
   function sendNarrowBridgeCommand(value) {
-    if (!value || typeof value !== "object") return Promise.reject(new Error("The command was invalid."));
-    const allowedKeys = new Set(["command", "names", "authorizationId"]);
-    if (!Object.keys(value).every((key) => allowedKeys.has(key))) return Promise.reject(new Error("The command contained an unsupported field."));
-    if (!["status", "list", "plan-upload", "apply-upload", "plan-delete", "apply-delete", "stop"].includes(value.command)) {
-      return Promise.reject(new Error("The command was not allowed."));
-    }
+    if (!isPlainBridgeObject(value)) return Promise.reject(new Error("The command was invalid."));
+    const keys = bridgeCommandKeys(value.command);
+    if (!keys.length || !hasExactBridgeKeys(value, keys)) return Promise.reject(new Error("The command contained an unsupported field."));
     const request = { type: COMMAND_REQUEST_MESSAGE, command: value.command, issueIdentifier };
     if (Object.prototype.hasOwnProperty.call(value, "names")) request.names = value.names;
     if (Object.prototype.hasOwnProperty.call(value, "authorizationId")) request.authorizationId = value.authorizationId;
@@ -1612,8 +1953,15 @@
         if (!pending) return false;
         window.clearTimeout(pending.timer);
         pendingZipRequests.delete(message.requestId);
-        if (message.ok === true && Number.isInteger(message.downloadId)) pending.resolve(message.downloadId);
-        else pending.reject(new Error(message.error || "Edge interrupted the ZIP download."));
+        if (message.ok === true && Number.isInteger(message.downloadId)) {
+          if (Number.isInteger(pending.downloadId) && pending.downloadId !== message.downloadId) {
+            pending.reject(indeterminateDownloadError("The browser reported a different ZIP download identifier after Save As started.", pending.downloadId));
+          } else {
+            pending.resolve(message.downloadId);
+          }
+        } else {
+          pending.reject(new Error(message.error || "Edge interrupted the ZIP download."));
+        }
         return false;
       }
       if (message?.type !== COMMAND_EXECUTE_MESSAGE || sender?.id !== chrome.runtime.id || sender.tab) return false;
@@ -1697,16 +2045,30 @@
       return;
     }
 
+    clearBridgeUploadSelection();
     selectedUploads = files;
     ui.fileInput.value = "";
     clearStatus();
     renderUploadFiles();
   });
   ui.fileInput.addEventListener("change", () => {
+    clearBridgeUploadSelection();
     selectedUploads = [...ui.fileInput.files];
     clearStatus();
     renderUploadFiles();
   });
+  ui.bridgeUploadInput.addEventListener("change", () => {
+    const files = [...ui.bridgeUploadInput.files].filter((file) => file.name);
+    ui.bridgeUploadInput.value = "";
+    ui.bridgeUploadInput.blur();
+    if (!bridgeUploadSelectionActive || !files.length) return;
+    selectedUploads.push(...files);
+    armBridgeUploadSelectionTimer();
+    renderUploadFiles();
+  });
+  ui.bridgeCommandInput.addEventListener("input", () => window.setTimeout(processPersistentBridgeInput, 0));
+  window.setInterval(processPersistentBridgeInput, 50);
+  window.addEventListener("pagehide", revokeAllRetainedBlobUrls, { once: true });
   ui.uploadAck.addEventListener("change", updateUploadButton);
   ui.uploadButton.addEventListener("click", startUpload);
   ui.downloadButton.addEventListener("click", startDownload);

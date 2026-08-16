@@ -5,13 +5,12 @@ const ZIP_TERMINAL_MESSAGE = "teal-eval-bulk-zip-terminal-v1";
 const COMMAND_REQUEST_MESSAGE = "teal-eval-bulk-command-v1";
 const COMMAND_EXECUTE_MESSAGE = "teal-eval-bulk-command-execute-v1";
 const NATIVE_DELETE_MESSAGE = "teal-eval-bulk-native-delete-v1";
-const TEAL_ORIGIN = "https://platform-teal-alpha.vercel.app";
 const ISSUE_PATH_PATTERN = /^\/issue\/([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\/?$/;
 const TOKEN_PATTERN = /^[A-Za-z0-9-]{16,80}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const DOWNLOAD_STORAGE_PREFIX = "tealZipDownload:";
-const ALLOWED_COMMANDS = new Set(["status", "list", "plan-upload", "apply-upload", "plan-delete", "apply-delete", "stop"]);
+const ALLOWED_COMMANDS = new Set(["capabilities", "status", "list", "prepare-upload", "cancel-upload", "plan-upload", "apply-upload", "plan-download", "apply-download", "plan-delete", "apply-delete", "stop"]);
 
 function validateFilename(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 240 && value !== "." && value !== ".." && !/[\\/\u0000-\u001f]/.test(value);
@@ -45,29 +44,39 @@ function allowedIssueOriginsFromManifest(manifest = chrome.runtime.getManifest()
   return origins;
 }
 
-function issueIdentifierFromUrl(url, origins = allowedIssueOriginsFromManifest()) {
+function issueContextFromUrl(url, origins = allowedIssueOriginsFromManifest()) {
   try {
     const parsed = new URL(url);
-    if (!origins.has(parsed.origin)) return "";
+    if (!origins.has(parsed.origin)) return null;
     // Production has no loopback match. This remains fail-closed if a broad
     // match is ever added by mistake because only the exact origin is accepted.
-    if (isLoopbackHostname(parsed.hostname) && !origins.has(parsed.origin)) return "";
-    return (parsed.pathname.match(ISSUE_PATH_PATTERN)?.[1] || "").toUpperCase();
+    if (isLoopbackHostname(parsed.hostname) && !origins.has(parsed.origin)) return null;
+    const issueIdentifier = (parsed.pathname.match(ISSUE_PATH_PATTERN)?.[1] || "").toUpperCase();
+    if (!issueIdentifier || parsed.search || parsed.hash || parsed.username || parsed.password) return null;
+    return { issueIdentifier, origin: parsed.origin };
   } catch {
-    return "";
+    return null;
   }
 }
 
-function senderIssueIdentifier(sender) {
-  if (sender?.id !== chrome.runtime.id || sender.frameId !== 0 || !Number.isInteger(sender.tab?.id)) return "";
-  return issueIdentifierFromUrl(sender.tab.url || sender.url || "");
+function issueIdentifierFromUrl(url, origins = allowedIssueOriginsFromManifest()) {
+  return issueContextFromUrl(url, origins)?.issueIdentifier || "";
 }
 
-function validateBlobUrl(value) {
+function senderIssueContext(sender) {
+  if (sender?.id !== chrome.runtime.id || sender.frameId !== 0 || !Number.isInteger(sender.tab?.id)) return null;
+  return issueContextFromUrl(sender.tab.url || sender.url || "");
+}
+
+function senderIssueIdentifier(sender) {
+  return senderIssueContext(sender)?.issueIdentifier || "";
+}
+
+function validateBlobUrl(value, expectedOrigin) {
   if (typeof value !== "string" || value.length > 1_000) return false;
   try {
     const url = new URL(value);
-    return url.protocol === "blob:" && url.origin === TEAL_ORIGIN;
+    return url.protocol === "blob:" && url.origin === expectedOrigin;
   } catch {
     return false;
   }
@@ -93,16 +102,15 @@ function validateEntries(entries) {
   return "";
 }
 
-function validateSaveMessage(message, sender) {
-  const senderIssue = senderIssueIdentifier(sender);
-  if (!senderIssue) return "The Save As request did not come from the top frame of an allowed issue page.";
+function validateSaveMessage(message, sender, senderContext = senderIssueContext(sender)) {
+  if (!senderContext) return "The Save As request did not come from the top frame of an allowed issue page.";
   if (!message || typeof message !== "object") return "The Save As request was missing.";
   if (!TOKEN_PATTERN.test(message.requestId || "")) return "The Save As request ID was invalid.";
   if (!TOKEN_PATTERN.test(message.batchId || "")) return "The Save As batch ID was invalid.";
   if (message.sequence !== 0) return "The Save As sequence was invalid.";
-  if (message.issueIdentifier !== senderIssue) return "The Save As issue identifier did not match this page.";
+  if (message.issueIdentifier !== senderContext.issueIdentifier) return "The Save As issue identifier did not match this page.";
   if (!validateFilename(message.archiveFilename) || !message.archiveFilename.toLowerCase().endsWith(".zip")) return "The ZIP filename was not safe to save.";
-  if (!validateBlobUrl(message.blobUrl)) return "The ZIP data URL was invalid.";
+  if (!validateBlobUrl(message.blobUrl, senderContext.origin)) return "The ZIP data URL was invalid.";
   return validateEntries(message.entries);
 }
 
@@ -114,8 +122,8 @@ function validateCommandMessage(message, sender) {
   if (!Object.keys(message).every((key) => allowedKeys.has(key))) return "The command contained an unsupported field.";
   if (!ALLOWED_COMMANDS.has(message.command)) return "The command was not allowed.";
   if (message.issueIdentifier !== senderIssue) return "The command issue identifier did not match this page.";
-  const needsNames = ["plan-upload", "apply-upload", "plan-delete", "apply-delete"].includes(message.command);
-  const needsAuthorization = ["apply-upload", "apply-delete"].includes(message.command);
+  const needsNames = ["plan-upload", "apply-upload", "plan-download", "apply-download", "plan-delete", "apply-delete"].includes(message.command);
+  const needsAuthorization = ["apply-upload", "apply-download", "apply-delete"].includes(message.command);
   if (!needsNames && Object.prototype.hasOwnProperty.call(message, "names")) return "This command cannot include names.";
   if (needsNames && (!Array.isArray(message.names) || message.names.length === 0 || message.names.length > 500 || !message.names.every(validateFilename))) return "The command names were invalid.";
   if (needsAuthorization && !TOKEN_PATTERN.test(message.authorizationId || "")) return "The CLI plan authorization was invalid.";
@@ -134,8 +142,8 @@ function validateNativeDeleteMessage(message, sender) {
   return "";
 }
 
-async function fetchJson(path) {
-  const response = await fetch(`${TEAL_ORIGIN}${path}`, { method: "GET", headers: { Accept: "application/json" }, credentials: "include", cache: "no-store" });
+async function fetchJson(origin, path) {
+  const response = await fetch(`${origin}${path}`, { method: "GET", headers: { Accept: "application/json" }, credentials: "include", cache: "no-store" });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload.error) throw new Error(payload.error || `The file service returned ${response.status}.`);
   return payload;
@@ -180,13 +188,32 @@ chrome.downloads.onChanged.addListener((delta) => {
   if (delta.state?.current === "complete" || delta.state?.current === "interrupted" || delta.error?.current) void notifyTerminal(delta.id, delta.state?.current === "complete" ? "complete" : "interrupted");
 });
 
-async function verifyEntries(message) {
-  const listPayload = await fetchJson(`/api/staged-files?issue_identifier=${encodeURIComponent(message.issueIdentifier)}`);
+async function verifyEntries(message, origin) {
+  const listPayload = await fetchJson(origin, `/api/staged-files?issue_identifier=${encodeURIComponent(message.issueIdentifier)}`);
   if (!Array.isArray(listPayload.rows)) throw new Error("The staged-file API did not return a file list.");
   for (const entry of message.entries) {
     const matches = listPayload.rows.filter((row) => row && typeof row === "object" && String(row.id) === entry.stagedId && row.filename === entry.filename && String(row.sha256 || "").toLowerCase() === entry.sha256.toLowerCase());
     if (matches.length !== 1) throw new Error(`The file service could not verify exactly one copy of ${entry.filename}.`);
   }
+}
+
+async function beginVerifiedSaveAs(message, sender, origin) {
+  await verifyEntries(message, origin);
+  const downloadId = await startSaveAs(message.blobUrl, message.archiveFilename);
+  try {
+    await chrome.storage.session.set({ [downloadStorageKey(downloadId)]: { tabId: sender.tab.id, requestId: message.requestId } });
+  } catch (error) {
+    return {
+      ok: false,
+      started: true,
+      indeterminate: true,
+      requestId: message.requestId,
+      downloadId,
+      error: `The browser started the ZIP download, but the extension could not track its final state. ${error instanceof Error ? error.message : String(error)}`
+    };
+  }
+  checkTerminalState(downloadId);
+  return { ok: true, started: true, requestId: message.requestId, downloadId };
 }
 
 // Serialized by chrome.scripting: no closure, no persistent MAIN-world bridge.
@@ -250,29 +277,35 @@ async function performNativeDelete(message, sender) {
 async function routeCommand(message, sender) {
   const validationError = validateCommandMessage(message, sender);
   if (validationError) return { ok: false, error: validationError };
+  const isApply = ["apply-upload", "apply-download", "apply-delete"].includes(message.command);
   try {
     const execution = { type: COMMAND_EXECUTE_MESSAGE, command: message.command, issueIdentifier: message.issueIdentifier };
     if (Object.prototype.hasOwnProperty.call(message, "names")) execution.names = [...message.names];
     if (Object.prototype.hasOwnProperty.call(message, "authorizationId")) execution.authorizationId = message.authorizationId;
     const result = await chrome.tabs.sendMessage(sender.tab.id, execution, { frameId: 0 });
-    return result && typeof result === "object" ? result : { ok: false, error: "The isolated controller returned no result." };
+    if (result && typeof result === "object") return result;
+    return isApply
+      ? { ok: false, indeterminate: true, error: `The ${message.command} command was dispatched, but the isolated controller returned no final result. The operation may still be running.` }
+      : { ok: false, error: "The isolated controller returned no result." };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    const detail = error instanceof Error ? error.message : String(error);
+    return isApply
+      ? { ok: false, indeterminate: true, error: `The ${message.command} command was dispatched, but its response channel failed. The operation may still be running. ${detail}` }
+      : { ok: false, error: detail };
   }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === SAVE_ZIP_MESSAGE) {
-    const validationError = validateSaveMessage(message, sender);
+    const senderContext = senderIssueContext(sender);
+    const validationError = validateSaveMessage(message, sender, senderContext);
     if (validationError) {
       sendResponse({ ok: false, requestId: message?.requestId || "", error: validationError });
       return false;
     }
-    verifyEntries(message).then(() => startSaveAs(message.blobUrl, message.archiveFilename)).then(async (downloadId) => {
-      await chrome.storage.session.set({ [downloadStorageKey(downloadId)]: { tabId: sender.tab.id, requestId: message.requestId } });
-      sendResponse({ ok: true, started: true, requestId: message.requestId, downloadId });
-      checkTerminalState(downloadId);
-    }).catch((error) => sendResponse({ ok: false, requestId: message.requestId, error: error instanceof Error ? error.message : String(error) }));
+    beginVerifiedSaveAs(message, sender, senderContext.origin)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, requestId: message.requestId, error: error instanceof Error ? error.message : String(error) }));
     return true;
   }
   if (message?.type === COMMAND_REQUEST_MESSAGE) {

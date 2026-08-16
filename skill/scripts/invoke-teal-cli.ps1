@@ -1,5 +1,8 @@
 [CmdletBinding(DefaultParameterSetName = 'Cdp')]
 param(
+    [Parameter(Mandatory = $true, ParameterSetName = 'PersistentBridge')]
+    [string]$PersistentBridgePath,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Cdp')]
     [string]$CdpEndpoint,
 
@@ -15,7 +18,7 @@ param(
     [string]$Issue,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet('status', 'list', 'plan-upload', 'apply-upload', 'plan-delete', 'apply-delete', 'stop')]
+    [ValidateSet('status', 'list', 'plan-upload', 'apply-upload', 'plan-download', 'apply-download', 'plan-delete', 'apply-delete', 'stop')]
     [string]$Command,
 
     [string[]]$Operands = @(),
@@ -55,8 +58,8 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ($manifest.version -ne '0.9.2') {
-    throw "This skill requires Teal Eval Bulk Files 0.9.2. Found $($manifest.version)."
+if ($manifest.version -ne '0.9.4') {
+    throw "This skill requires Teal Eval Bulk Files 0.9.4. Found $($manifest.version)."
 }
 
 $node = Get-Command node -ErrorAction Stop
@@ -70,6 +73,16 @@ if ($PSCmdlet.ParameterSetName -eq 'Browser') {
     if ($UserDataDir) {
         $arguments += @('--user-data-dir', [IO.Path]::GetFullPath($UserDataDir))
     }
+} elseif ($PSCmdlet.ParameterSetName -eq 'PersistentBridge') {
+    $persistentBridgeUri = $null
+    if (-not [Uri]::TryCreate($PersistentBridgePath, [UriKind]::Absolute, [ref]$persistentBridgeUri) -or -not $persistentBridgeUri.IsFile) {
+        throw 'PersistentBridgePath must be an absolute local file path.'
+    }
+    $resolvedPersistentBridgePath = [IO.Path]::GetFullPath($persistentBridgeUri.LocalPath)
+    if (-not (Test-Path -LiteralPath $resolvedPersistentBridgePath -PathType Leaf)) {
+        throw "The persistent Chrome stdio proxy was not found at $resolvedPersistentBridgePath"
+    }
+    $arguments += @('--persistent-bridge', $resolvedPersistentBridgePath)
 } else {
     $arguments += @('--cdp', $CdpEndpoint)
 }

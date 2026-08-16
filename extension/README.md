@@ -67,23 +67,31 @@ For deletions, the final confirmation shows the exact filename and the first eig
 
 ## Local CLI (optional)
 
-`teal-eval-bulk-cli.mjs` is a dependency-free Node 24 tool for an already open browser. It supports an explicit loopback CDP endpoint and a user-selected current Chrome or Edge session. It does not launch a browser, open a tab, navigate a page, read cookies, or read credential stores.
+`teal-eval-bulk-cli.mjs` is a dependency-free Node 24 tool for an already open browser. Version 0.9.4 supports planned upload, download, and deletion through the persistent MCP transport. This transport uses the reviewed stdio proxy and the existing long-running Chrome backend. It does not read the daemon token or connect to the daemon pipe. It does not launch a browser, open a tab, navigate a page, read cookies, or read credential stores.
 
 ```text
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 status
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 list
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 plan-upload C:\files\one.txt C:\files\two.csv
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 apply-upload <plan-token>
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 plan-delete old-file.txt
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 apply-delete <plan-token>
-node teal-eval-bulk-cli.mjs --cdp http://127.0.0.1:9222 --issue DEMO-204 stop
+node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 status
+node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 list
+node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 plan-download report.pdf results.csv
+node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 apply-download <one-use-plan-token>
 ```
 
-For a selected current Chrome or Edge session, first enable remote debugging at `chrome://inspect/#remote-debugging` or `edge://inspect/#remote-debugging`. The browser can show one local connection permission prompt. Then use:
+The public PowerShell wrapper requires the persistent proxy path for each persistent-mode call:
+
+```powershell
+& "<path-to-invoke-teal-cli.ps1>" `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 `
+  -Command status
+```
+
+Persistent mode opens a short stdio proxy session for each browser action. Each session lists the pages, selects the exact issue tab, performs one action, and closes. The shared daemon and Chrome backend stay open. This prevents a new direct Chrome debugging connection for every CLI command. A failed persistent call never falls back to direct CDP.
+
+Direct current-browser and explicit CDP modes remain available for compatibility. They are not the default and can create another Chrome permission request. For direct current-browser mode, use:
 
 ```text
-node teal-eval-bulk-cli.mjs --browser chrome --issue ABC-123 status
-node teal-eval-bulk-cli.mjs --browser edge --issue ABC-123 list
+node teal-eval-bulk-cli.mjs --browser chrome --issue DEMO-204 status
+node teal-eval-bulk-cli.mjs --browser edge --issue DEMO-204 list
 ```
 
 Current-session mode reads only the selected browser data root's small `DevToolsActivePort` record. It uses the private loopback WebSocket path without printing it. It lists targets internally only to find exactly one allowed issue URL and never prints unrelated tab URLs.
@@ -91,16 +99,16 @@ Current-session mode reads only the selected browser data root's small `DevTools
 The explicit endpoint mode remains available. A separate Edge debug profile can be started with a loopback port when current-session access is not available. Load this unpacked extension in that profile once, then keep the target issue tab open. Example PowerShell launch:
 
 ```powershell
-& "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222 --user-data-dir="$env:LOCALAPPDATA\TealBulkCliProfile"
+& "<path-to-msedge.exe>" --remote-debugging-port=9222 --user-data-dir="$env:LOCALAPPDATA\TealBulkCliProfile"
 ```
 
-The CLI does not open or click a visual confirmation. After the user requests an exact upload or deletion, `plan-*` returns the actionable names and a one-use token. `apply-*` uses that token to start the matching plan without an OK or Confirm click.
+The CLI does not open or click a visual confirmation. After the user requests an exact upload, download, or deletion, `plan-*` returns the actionable names and a one-use token. `apply-*` uses that token to start the matching plan without an OK or Confirm click. A download apply uses the same verified ZIP pipeline as the human interface and opens exactly one browser **Save As** dialog.
 
-The CLI only accepts an already open allowed issue target. It uses the browser debugging protocol only to select that exact target, set paths on the extension's file input, and call the narrow isolated bridge commands: `status`, `list`, `plan-upload`, `apply-upload`, `plan-delete`, `apply-delete`, and `stop`. It cannot send JavaScript, selectors, URLs, fetch requests, or arbitrary browser methods through that bridge.
+The CLI only accepts an already open allowed issue target. Persistent mode uses fixed accessibility controls inside the extension's closed shadow root. It can fill one strict command envelope, add one local file at a time to the dedicated upload input, and read a request-bound result. It cannot send arbitrary JavaScript, selectors, URLs, fetch requests, or browser methods through that extension protocol.
 
 Treat local CDP access as a trusted local mutation authority. The one-use plan layers prevent accidental, stale, mismatched, and repeated CLI applies. They do not protect against a hostile local process that already controls the same CDP session, because that process can create and apply its own plan.
 
-Each `plan-*` command writes a random, one-use token in the local temporary state file. The extension also returns a short-lived, one-use authorization ID that the CLI keeps only inside that token record and does not print. The plan is bound to the issue ID, target tab ID, operation, exact requested names, original planned upload `File` objects or delete rows, and a sorted staged-file inventory. `apply-*` rechecks that inventory, consumes both authorization layers, and starts the batch without a visual confirmation. The JSON result reports `succeeded`, `skipped`, `failed`, and `remaining`; it never retries a mutation automatically.
+Each `plan-*` command writes a random, one-use token in the local temporary state file. The extension also returns a short-lived, one-use authorization ID that the CLI keeps only inside that token record and does not print. The plan is bound to the issue ID, target tab ID, exact URL, page title, page-document generation, connection mode, operation, exact requested names, original planned upload `File` objects or staged rows, and a sorted staged-file inventory. `apply-*` rechecks that inventory and consumes both authorization layers before it starts. The JSON result reports `succeeded`, `skipped`, `failed`, and `remaining`. A completed download also reports `archiveFilename` and `downloadId`. The CLI never retries an apply automatically.
 
 For local-only verification, `tests/generate-teal-test-manifest.mjs` can create a manifest with the exact `http://127.0.0.1:8769/issue/*` match and exact loopback host permission. It changes only the generated manifest. The extension source files are unchanged. Do not package that generated manifest.
 

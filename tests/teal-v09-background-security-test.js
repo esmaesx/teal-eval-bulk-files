@@ -108,6 +108,41 @@ function send(message, from) {
   assert.equal(authorizedApply.ok, true);
   assert.equal(routed.at(-1).authorizationId, "11111111-1111-4111-8111-111111111111");
 
+  const planDownload = await send({ ...command, command: "plan-download", names: ["file.txt"] }, valid);
+  assert.equal(planDownload.ok, true);
+  assert.equal(JSON.stringify(routed.at(-1)), JSON.stringify({
+    type: "teal-eval-bulk-command-execute-v1",
+    command: "plan-download",
+    issueIdentifier: "TAB-TEST",
+    names: ["file.txt"]
+  }));
+  assert.equal((await send({ ...command, command: "plan-download" }, valid)).ok, false);
+  assert.equal((await send({ ...command, command: "plan-download", names: ["../file.txt"] }, valid)).ok, false);
+  assert.equal((await send({ ...command, command: "plan-download", names: ["file.txt"], authorizationId: "11111111-1111-4111-8111-111111111111" }, valid)).ok, false);
+
+  const applyDownloadWithoutAuthorization = await send({ ...command, command: "apply-download", names: ["file.txt"] }, valid);
+  assert.equal(applyDownloadWithoutAuthorization.ok, false);
+  assert.equal((await send({ ...command, command: "apply-download", authorizationId: "11111111-1111-4111-8111-111111111111" }, valid)).ok, false);
+  assert.equal((await send({ ...command, command: "apply-download", names: ["file.txt"], authorizationId: "bad" }, valid)).ok, false);
+  assert.equal((await send({ ...command, command: "apply-download", names: ["file.txt"], authorizationId: "11111111-1111-4111-8111-111111111111", archiveFilename: "forbidden.zip" }, valid)).ok, false);
+  assert.equal((await send({ ...command, command: "download", names: ["file.txt"] }, valid)).ok, false);
+  const injectedBeforeDownload = injected.length;
+  const applyDownload = await send({
+    ...command,
+    command: "apply-download",
+    names: ["file.txt"],
+    authorizationId: "11111111-1111-4111-8111-111111111111"
+  }, valid);
+  assert.equal(applyDownload.ok, true);
+  assert.equal(JSON.stringify(routed.at(-1)), JSON.stringify({
+    type: "teal-eval-bulk-command-execute-v1",
+    command: "apply-download",
+    issueIdentifier: "TAB-TEST",
+    names: ["file.txt"],
+    authorizationId: "11111111-1111-4111-8111-111111111111"
+  }));
+  assert.equal(injected.length, injectedBeforeDownload, "download commands must not inject a visual confirmation click");
+
   manifest = { content_scripts: [{ matches: ["<all_urls>", "https://*.example.test/issue/*", "https://platform-teal-alpha.vercel.app/not-issue/*"] }] };
   const wildcardRejected = await send(command, valid);
   assert.equal(wildcardRejected.ok, false);

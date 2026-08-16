@@ -47,4 +47,4 @@ Loading the extension lets the human interface work. The CLI also needs the sele
 - Chrome: `chrome://inspect/#remote-debugging`
 - Edge: `edge://inspect/#remote-debugging`
 
-The browser can show one local connection prompt. This prompt grants the CLI connection. It is not an upload or deletion confirmation.
+The browser can show one local connection prompt. This prompt grants only the CLI connection. It does not authorize an upload, download, or deletion, and it is not the native Save As dialog.

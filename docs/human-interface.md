@@ -61,4 +61,6 @@ Deletion cannot be undone. The extension gives a five-second stop delay before t
 
 ## Human and CLI confirmation rules
 
-Human actions always use the extension's Confirm/Cancel dialog. CLI actions use a different path: the exact user request, one-use plan token, one-use extension authorization, and a fresh inventory check. A valid CLI apply does not open or click the human confirmation dialog.
+Human upload and delete actions use the extension's Confirm/Cancel dialog. Human download uses the selected rows and one native Save As dialog.
+
+CLI actions use a separate path: the exact user request, a one-use plan token, a one-use extension authorization, and a fresh identity and inventory check. A valid CLI apply does not open or click the extension confirmation dialog. CLI download creates one verified ZIP and opens exactly one native Save As dialog. It does not accept an arbitrary absolute output path.
