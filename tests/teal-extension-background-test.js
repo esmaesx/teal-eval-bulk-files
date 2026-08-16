@@ -14,10 +14,14 @@ const staged = {
 };
 let listener;
 let downloadOptions;
+let downloadCalls = 0;
 let fetched = [];
 const changeListeners = new Set();
 const sessionStorage = {};
 const terminalMessages = [];
+const commandMessages = [];
+let rejectSessionSet = false;
+let rejectCommandResponse = false;
 
 const context = {
   URL,
@@ -43,6 +47,7 @@ const context = {
         removeListener: (value) => changeListeners.delete(value)
       },
       download: (options, callback) => {
+        downloadCalls += 1;
         downloadOptions = options;
         callback(42);
       },
@@ -51,12 +56,20 @@ const context = {
     storage: {
       session: {
         get: async (key) => ({ [key]: sessionStorage[key] }),
-        set: async (values) => Object.assign(sessionStorage, values),
+        set: async (values) => {
+          if (rejectSessionSet) throw new Error("mock session storage rejected the write");
+          Object.assign(sessionStorage, values);
+        },
         remove: async (key) => { delete sessionStorage[key]; }
       }
     },
     tabs: {
       sendMessage: async (tabId, message) => {
+        if (message.type === "teal-eval-bulk-command-execute-v1") {
+          commandMessages.push({ tabId, message });
+          if (rejectCommandResponse) throw new Error("mock apply response channel closed");
+          return { ok: true };
+        }
         terminalMessages.push({ tabId, message });
       }
     }
@@ -126,6 +139,47 @@ function send(value, from = sender) {
   const wrongIdentity = await send({ ...message, entries: [{ ...entry, sha256: "b".repeat(64) }] });
   assert.equal(wrongIdentity.ok, false);
   assert.equal(fetched.length, 1);
+
+  rejectSessionSet = true;
+  const callsBeforeIndeterminate = downloadCalls;
+  const messagesBeforeIndeterminate = terminalMessages.length;
+  const indeterminateMessage = {
+    ...message,
+    requestId: "44444444-4444-4444-8444-444444444444"
+  };
+  const indeterminate = await send(indeterminateMessage);
+  assert.equal(indeterminate.ok, false);
+  assert.equal(indeterminate.started, true);
+  assert.equal(indeterminate.indeterminate, true);
+  assert.equal(indeterminate.requestId, indeterminateMessage.requestId);
+  assert.equal(indeterminate.downloadId, 42);
+  assert.match(indeterminate.error, /started.*could not track|session storage rejected/iu);
+  assert.equal(downloadCalls, callsBeforeIndeterminate + 1, "the background must not retry a started download");
+  assert.equal(Object.keys(sessionStorage).length, 0);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(terminalMessages.length, messagesBeforeIndeterminate, "an untracked download must not report a false terminal result");
+
+  rejectCommandResponse = true;
+  const applyResponseLoss = await send({
+    type: "teal-eval-bulk-command-v1",
+    command: "apply-download",
+    issueIdentifier: "TAB-TEST",
+    names: [staged.filename],
+    authorizationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+  });
+  assert.equal(applyResponseLoss.ok, false);
+  assert.equal(applyResponseLoss.indeterminate, true);
+  assert.match(applyResponseLoss.error, /dispatched.*response channel failed.*may still be running/iu);
+  assert.equal(commandMessages.filter(({ message: value }) => value.command === "apply-download").length, 1);
+
+  const listResponseLoss = await send({
+    type: "teal-eval-bulk-command-v1",
+    command: "list",
+    issueIdentifier: "TAB-TEST"
+  });
+  assert.equal(listResponseLoss.ok, false);
+  assert.equal(listResponseLoss.indeterminate, undefined);
+  assert.match(listResponseLoss.error, /mock apply response channel closed/u);
 
   console.log("background tests passed");
 })().catch((error) => {
