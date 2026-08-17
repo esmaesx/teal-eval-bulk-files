@@ -9,7 +9,8 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://platform-teal-alpha.vercel.app/*"
+    "https://platform-teal-alpha.vercel.app/*",
+    "http://127.0.0.1:8769/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -17,7 +18,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://platform-teal-alpha.vercel.app/issue/*"
+        "https://platform-teal-alpha.vercel.app/issue/*",
+        "http://127.0.0.1:8769/issue/*"
       ],
       "js": [
         "zip-builder.js",

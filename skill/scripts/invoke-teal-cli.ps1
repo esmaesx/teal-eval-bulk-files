@@ -18,15 +18,19 @@ param(
     [string]$Issue,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet('status', 'list', 'plan-upload', 'apply-upload', 'plan-download', 'apply-download', 'plan-delete', 'apply-delete', 'stop')]
+    [ValidateSet('status', 'list', 'plan-upload', 'apply-upload', 'plan-download', 'apply-download', 'plan-delete', 'apply-delete', 'verify', 'stop')]
     [string]$Command,
 
+    [Alias('Names', 'Files', 'Paths', 'PlanToken')]
     [string[]]$Operands = @(),
 
     [string]$StatePath = '',
 
     [ValidateRange(1, 3600)]
     [int]$TtlSeconds = 300,
+
+    [ValidatePattern('^[A-Za-z0-9_-]{1,128}$')]
+    [string]$TargetId = '',
 
     [string]$ExtensionRoot = ''
 )
@@ -58,8 +62,8 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ($manifest.version -ne '0.9.4') {
-    throw "This skill requires Teal Eval Bulk Files 0.9.4. Found $($manifest.version)."
+if ($manifest.version -ne '0.9.6') {
+    throw "This skill requires Teal Eval Bulk Files 0.9.6. Found $($manifest.version)."
 }
 
 $node = Get-Command node -ErrorAction Stop
@@ -88,6 +92,9 @@ if ($PSCmdlet.ParameterSetName -eq 'Browser') {
 }
 if ($StatePath) {
     $arguments += @('--state', [IO.Path]::GetFullPath($StatePath))
+}
+if ($TargetId) {
+    $arguments += @('--target-id', $TargetId)
 }
 $arguments += $Command
 $arguments += $Operands

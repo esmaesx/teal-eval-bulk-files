@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -17,7 +18,9 @@ import {
   validatePlanToken
 } from "../extension/teal-eval-bulk-cli.mjs";
 import {
+  McpRpcError,
   McpStdioSession,
+  McpToolError,
   PERSISTENT_BRIDGE_EXTENSION_VERSION,
   PersistentBridgeClient,
   decodeTerminalMarker
@@ -168,6 +171,13 @@ test("direct CDP rejects pending requests on socket loss and request timeout", a
   );
   assert.equal(timedClient.pending.size, 0);
   timedClient.close();
+
+  const protocolSocket = new FakeOpenSocket();
+  const protocolClient = new CdpClient(protocolSocket);
+  const protocolFailure = protocolClient.request("Runtime.callFunctionOn", {}, null, 1_000);
+  protocolSocket.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ id: 1, error: { code: -32000, message: "evaluation failed" } }) }));
+  await assert.rejects(protocolFailure, (error) => error.requestDispatched === true && error.method === "Runtime.callFunctionOn");
+  protocolClient.close();
 });
 
 test("direct apply-download socket loss is indeterminate, one-use, and not retried", { concurrency: false }, async () => {
@@ -442,6 +452,104 @@ test("MCP stdio framing remains fragmented and out of order safe", { concurrency
   }
 });
 
+test("MCP JSON-RPC and tool errors preserve sanitized structured fields", { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), "teal-download-mcp-errors-"));
+  const fakeState = join(temp, "fake.json");
+  const prior = process.env.TEAL_FAKE_MCP_STATE;
+  process.env.TEAL_FAKE_MCP_STATE = fakeState;
+  try {
+    const session = await McpStdioSession.open(fakeProxyPath);
+    await assert.rejects(
+      session.request("test/rpc-error", {}),
+      (error) => error instanceof McpRpcError
+        && error.rpcCode === -32603
+        && error.rpcMessage.includes("[url]")
+        && !error.rpcMessage.includes("private.example")
+        && error.status === "custom_failure"
+        && error.data.secretToken === "[redacted]"
+        && !JSON.stringify(error.data).includes("must-not-leak")
+    );
+    const toolError = new McpToolError("failed at https://private.example/path", {
+      status: "lease_busy",
+      data: { owner: "unknown", owner_pid: 4321, authorizationToken: "must-not-leak", commandLine: "node proxy --token private", pageData: "private-page-data" }
+    });
+    assert.equal(toolError.status, "lease_busy");
+    assert.equal(toolError.data.owner, "unknown");
+    assert.equal(toolError.data.owner_pid, 4321);
+    assert.equal(toolError.data.authorizationToken, "[redacted]");
+    assert.equal(toolError.data.commandLine, "[redacted]");
+    assert.equal(toolError.data.pageData, "[redacted]");
+    assert.doesNotMatch(toolError.message, /private\.example/u);
+    await session.close();
+  } finally {
+    if (prior === undefined) delete process.env.TEAL_FAKE_MCP_STATE;
+    else process.env.TEAL_FAKE_MCP_STATE = prior;
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("MCP child shutdown waits for SIGTERM exit and stays bounded when the child does not exit", async () => {
+  class FakeChild extends EventEmitter {
+    constructor({ exitsAfterSignal }) {
+      super();
+      this.exitCode = null;
+      this.signalCode = null;
+      this.exitsAfterSignal = exitsAfterSignal;
+      this.stdin = { destroyed: false, end() {} };
+      this.signals = [];
+    }
+
+    kill(signal) {
+      this.signals.push(signal);
+      if (this.exitsAfterSignal) {
+        setTimeout(() => {
+          this.signalCode = signal;
+          this.emit("exit", null, signal);
+        }, 2);
+      }
+      return true;
+    }
+  }
+
+  const exitingSession = new McpStdioSession("unused", { shutdownGraceMs: 5, shutdownTermMs: 20 });
+  const exitingChild = new FakeChild({ exitsAfterSignal: true });
+  exitingSession.child = exitingChild;
+  const exited = await exitingSession.close();
+  assert.deepEqual(exitingChild.signals, ["SIGTERM"]);
+  assert.deepEqual(exited, { exited: true, signalSent: true });
+
+  const stuckSession = new McpStdioSession("unused", { shutdownGraceMs: 5, shutdownTermMs: 5 });
+  const stuckChild = new FakeChild({ exitsAfterSignal: false });
+  stuckSession.child = stuckChild;
+  const startedAt = Date.now();
+  const stuck = await stuckSession.close();
+  assert.equal(stuck.exited, false);
+  assert.equal(stuck.signalSent, true);
+  assert.equal(stuck.error.errorKind, "proxy_lifecycle");
+  assert.ok(Date.now() - startedAt < 500);
+});
+
+test("persistent no-tab failure exits 3 and confirms zero mutation dispatch", { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), "teal-no-tab-"));
+  try {
+    const statePath = join(temp, "tokens.json");
+    await writeFakeState(statePath, { page: null });
+    const run = await runCli(statePath, ["status"]);
+    assert.equal(run.code, 3, run.stderr);
+    const result = parseOnlyJson(run.stdout);
+    assert.equal(result.errorKind, "no_matching_tab");
+    assert.equal(result.transportResponded, true);
+    assert.equal(result.mutationStarted, false);
+    assert.match(result.error, /required allowed issue tab is not open/u);
+    assert.match(result.error, /No mutation started/u);
+    const fake = await readJson(`${statePath}.fake`);
+    assert.deepEqual(fake.calls.map((call) => call.name), ["list_pages"]);
+    assert.deepEqual(fake.commandEnvelopes, []);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
 test("plan-download returns actionable and skipped names and saves one-use state", { concurrency: false }, async () => {
   const temp = await mkdtemp(join(tmpdir(), "teal-download-plan-"));
   try {
@@ -615,7 +723,12 @@ test("persistent status, upload, and delete behavior remains covered", { concurr
     const deletePlan = parseOnlyJson(deletePlanRun.stdout);
     const deleteApplyRun = await runCli(statePath, ["apply-delete", deletePlan.token]);
     assert.equal(deleteApplyRun.code, 0, deleteApplyRun.stderr);
-    assert.deepEqual(parseOnlyJson(deleteApplyRun.stdout).succeeded, ["existing-beta.csv"]);
+    const deleteApplied = parseOnlyJson(deleteApplyRun.stdout);
+    assert.deepEqual(deleteApplied.succeeded, ["existing-beta.csv"]);
+    assert.deepEqual(deleteApplied.inventoryBefore, deletePlan.inventory);
+    assert.equal(deleteApplied.inventoryAfter.some((row) => row.filename === "existing-beta.csv"), false);
+    assert.deepEqual(deleteApplied.inventory, deleteApplied.inventoryAfter);
+    assert.equal(deleteApplied.replayAllowed, false);
 
     const fake = await readJson(`${statePath}.fake`);
     assertActionDiscipline(fake.calls);

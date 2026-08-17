@@ -43,7 +43,22 @@ function parseOnlyJson(stdout) {
   return JSON.parse(lines[0]);
 }
 
-test("PowerShell wrapper preserves persistent mapping, parameter sets, version gate, and CLI failures", { concurrency: false }, async () => {
+test("PowerShell wrapper source preserves aliases, transport parameter sets, and the version gate", async () => {
+  const wrapperSource = await readFile(wrapperPath, "utf8");
+  assert.match(wrapperSource, /Mandatory\s*=\s*\$true,\s*ParameterSetName\s*=\s*'PersistentBridge'[\s\S]*?\$PersistentBridgePath/u);
+  assert.match(wrapperSource, /ParameterSetName\s*=\s*'Cdp'[\s\S]*?\$CdpEndpoint/u);
+  assert.match(wrapperSource, /ParameterSetName\s*=\s*'Browser'[\s\S]*?\$Browser/u);
+  assert.match(wrapperSource, /\[Alias\('Names',\s*'Files',\s*'Paths',\s*'PlanToken'\)\][\s\S]*?\$Operands/u);
+  assert.match(wrapperSource, /\$manifest\.version\s*-ne\s*'0\.9\.6'/u);
+  assert.match(wrapperSource, /'--persistent-bridge',\s*\$resolvedPersistentBridgePath/u);
+  assert.match(wrapperSource, /'--target-id',\s*\$TargetId/u);
+  assert.match(wrapperSource, /TryCreate\(\$PersistentBridgePath,\s*\[UriKind\]::Absolute/u);
+});
+
+test("PowerShell wrapper preserves persistent mapping, parameter sets, version gate, and CLI failures", {
+  concurrency: false,
+  skip: process.platform === "win32" ? false : "Windows PowerShell 5.1 is required for the wrapper process test."
+}, async () => {
   const temp = await mkdtemp(join(tmpdir(), "teal-wrapper-contract-"));
   try {
     const statePath = join(temp, "tokens.json");
@@ -66,6 +81,26 @@ test("PowerShell wrapper preserves persistent mapping, parameter sets, version g
     assert.ok(fake.calls.some((call) => call.name === "list_pages"));
     assert.ok(fake.calls.some((call) => call.name === "select_page"));
     assert.ok(fake.commandEnvelopes.some((value) => value.command.command === "status"));
+
+    const deletePlan = await runPowerShell([...common, "-Command", "plan-delete", "-Names", "existing-alpha.txt"], { TEAL_FAKE_MCP_STATE: fakeStatePath });
+    assert.equal(deletePlan.code, 0, deletePlan.stderr);
+    const deletePlanJson = parseOnlyJson(deletePlan.stdout);
+    assert.deepEqual(deletePlanJson.actionableNames, ["existing-alpha.txt"]);
+    const deleteApply = await runPowerShell([...common, "-Command", "apply-delete", "-PlanToken", deletePlanJson.token], { TEAL_FAKE_MCP_STATE: fakeStatePath });
+    assert.equal(deleteApply.code, 0, deleteApply.stderr);
+    assert.deepEqual(parseOnlyJson(deleteApply.stdout).succeeded, ["existing-alpha.txt"]);
+
+    const pathsUpload = join(temp, "paths-upload.txt");
+    await writeFile(pathsUpload, "paths", "utf8");
+    const pathsPlan = await runPowerShell([...common, "-Command", "plan-upload", "-Paths", pathsUpload], { TEAL_FAKE_MCP_STATE: fakeStatePath });
+    assert.equal(pathsPlan.code, 0, pathsPlan.stderr);
+    assert.deepEqual(parseOnlyJson(pathsPlan.stdout).actionableNames, ["paths-upload.txt"]);
+
+    const filesUpload = join(temp, "files-upload.txt");
+    await writeFile(filesUpload, "files", "utf8");
+    const filesPlan = await runPowerShell([...common, "-Command", "plan-upload", "-Files", filesUpload], { TEAL_FAKE_MCP_STATE: fakeStatePath });
+    assert.equal(filesPlan.code, 0, filesPlan.stderr);
+    assert.deepEqual(parseOnlyJson(filesPlan.stdout).actionableNames, ["files-upload.txt"]);
 
     const mutuallyExclusive = await runPowerShell([
       "-Browser", "chrome",
@@ -99,14 +134,6 @@ test("PowerShell wrapper preserves persistent mapping, parameter sets, version g
     assert.match(relativePersistent.stderr, /must be an absolute local file path/iu);
     assert.equal(relativePersistent.stdout, "");
 
-    const wrapperSource = await readFile(wrapperPath, "utf8");
-    assert.match(wrapperSource, /Mandatory\s*=\s*\$true,\s*ParameterSetName\s*=\s*'PersistentBridge'[\s\S]*?\$PersistentBridgePath/u);
-    assert.match(wrapperSource, /ParameterSetName\s*=\s*'Cdp'[\s\S]*?\$CdpEndpoint/u);
-    assert.match(wrapperSource, /ParameterSetName\s*=\s*'Browser'[\s\S]*?\$Browser/u);
-    assert.match(wrapperSource, /\$manifest\.version\s*-ne\s*'0\.9\.4'/u);
-    assert.match(wrapperSource, /'--persistent-bridge',\s*\$resolvedPersistentBridgePath/u);
-    assert.match(wrapperSource, /TryCreate\(\$PersistentBridgePath,\s*\[UriKind\]::Absolute/u);
-
     const oldExtensionRoot = join(temp, "old-extension");
     await mkdir(oldExtensionRoot, { recursive: true });
     await cp(join(extensionRoot, "teal-eval-bulk-cli.mjs"), join(oldExtensionRoot, "teal-eval-bulk-cli.mjs"));
@@ -118,7 +145,7 @@ test("PowerShell wrapper preserves persistent mapping, parameter sets, version g
       "-ExtensionRoot", oldExtensionRoot
     ], { TEAL_FAKE_MCP_STATE: join(temp, "old-version.fake") });
     assert.notEqual(oldVersion.code, 0);
-    assert.match(oldVersion.stderr, /requires Teal Eval Bulk Files 0\.9\.4\. Found 0\.9\.3/iu);
+    assert.match(oldVersion.stderr, /requires Teal Eval Bulk Files 0\.9\.6\. Found 0\.9\.3/iu);
     assert.equal(oldVersion.stdout, "");
 
     const failedApply = await runPowerShell([

@@ -1,11 +1,14 @@
 {
   "name": "teal-eval-bulk-files",
-  "version": "0.9.4",
+  "version": "0.9.6",
   "private": true,
   "description": "Browser extension, local CLI, Codex skill, and local mock tests for Teal eval staged files.",
   "scripts": {
-    "test": "node tests/teal-v09-cli-contract-test.mjs && node tests/teal-v09-cli-process-test.mjs && node --test tests/teal-download-cli.test.mjs && node --test tests/teal-wrapper-contract.test.mjs && node tests/bridge-plan-store.test.js && node tests/teal-extension-background-test.js && node tests/teal-extension-bridge-test.js && node tests/zip-builder.test.js && node tests/teal-v09-background-security-test.js",
+    "test": "node tests/teal-v09-cli-contract-test.mjs && node tests/teal-v09-cli-process-test.mjs && node --test tests/teal-upload-safety.test.mjs && node --test tests/upload-snapshot-store.test.mjs && node --test tests/teal-download-cli.test.mjs && node --test tests/teal-wrapper-contract.test.mjs && node --test tests/delete-apply-envelope.test.js && node tests/bridge-plan-store.test.js && node tests/teal-extension-background-test.js && node tests/teal-extension-bridge-test.js && node tests/zip-builder.test.js && node tests/teal-v09-background-security-test.js",
     "test:download-browser": "node tests/teal-download-browser-integration.mjs",
+    "test:upload-browser": "node tests/teal-upload-browser-integration.mjs",
+    "test:delete-observation-browser": "node tests/teal-delete-observation-browser-integration.mjs",
+    "test:bridge-integration": "node --test tests/cross-repository-persistent-bridge.integration.test.mjs",
     "test:manifest": "node tests/generate-teal-test-manifest.mjs tests/test-manifest.json",
     "mock": "python tests/mock/server.py",
     "docs:capture": "node tests/capture-doc-screenshots.mjs",

@@ -61,19 +61,24 @@ If you cancel the Save As dialog, a file cannot be read, or the ZIP cannot be bu
 
 The ZIP keeps each original filename. If two selected rows have the same filename, select only one of them so extraction cannot overwrite one file with the other.
 
-If the page shows two rows with the same filename and SHA-256 value, the extension marks them as duplicate rows and excludes them from bulk download and bulk deletion. Use the page's native control for those rows so the extension cannot act on the wrong copy.
+If the page shows two rows with the same filename and SHA-256 value, the extension marks them as duplicate rows and excludes them from bulk download and bulk deletion. An agent must never click the page's native **remove** control. Ask the human operator to use that control for an ambiguous row.
 
 For deletions, the final confirmation shows the exact filename and the first eight characters of its SHA-256 value. After confirmation, a five-second countdown starts before the first deletion. Choose **Stop deletion** during the countdown to delete nothing and keep the full selection. Choose it after deletion starts to finish only the current file and keep all later files selected. The extension also stops if the page changes before it can delete the exact next row.
 
+The current interface already shows SHA-256 prefixes in delete review and per-file progress during upload, download, and delete work. Version 0.9.6 has no visual interface change.
+
 ## Local CLI (optional)
 
-`teal-eval-bulk-cli.mjs` is a dependency-free Node 24 tool for an already open browser. Version 0.9.4 supports planned upload, download, and deletion through the persistent MCP transport. This transport uses the reviewed stdio proxy and the existing long-running Chrome backend. It does not read the daemon token or connect to the daemon pipe. It does not launch a browser, open a tab, navigate a page, read cookies, or read credential stores.
+`teal-eval-bulk-cli.mjs` is a dependency-free Node 24 tool for an already open browser. Version 0.9.6 supports planned upload, download, deletion, and read-only verification through the persistent MCP transport. This transport uses the reviewed stdio proxy and the existing long-running Chrome backend. It does not read the daemon token or connect to the daemon pipe. It does not launch a browser, open a tab, navigate a page, read cookies, or read credential stores.
 
 ```text
 node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 status
 node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 list
+node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 plan-upload C:\work\evidence.csv C:\work\notes.txt
+node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 apply-upload <one-use-plan-token>
 node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 plan-download report.pdf results.csv
 node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 apply-download <one-use-plan-token>
+node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 verify C:\work\report.pdf
 ```
 
 The public PowerShell wrapper requires the persistent proxy path for each persistent-mode call:
@@ -85,7 +90,23 @@ The public PowerShell wrapper requires the persistent proxy path for each persis
   -Command status
 ```
 
-Persistent mode opens a short stdio proxy session for each browser action. Each session lists the pages, selects the exact issue tab, performs one action, and closes. The shared daemon and Chrome backend stay open. This prevents a new direct Chrome debugging connection for every CLI command. A failed persistent call never falls back to direct CDP.
+Persistent mode opens a short stdio proxy session for each browser action. Each session lists the pages, selects the exact issue tab, performs one action, and closes. The shared daemon and Chrome backend stay open. Use this mode for work with several commands. It prevents a new direct Chrome debugging connection for every CLI command. A failed persistent call never falls back to direct CDP. Direct current-browser and explicit CDP mode can show a local browser permission prompt.
+
+If more than one allowed issue tab matches, the CLI reports only safe target IDs and titles. It never selects one by itself. Pass `--target-id <listed-id>` to select one exact allowed tab. The PowerShell wrapper uses `-TargetId <listed-id>`.
+
+`list`, all plans, and `verify` require a present staged-files panel that is not loading. A present ready panel with no rows is a valid empty inventory. A missing or loading panel is an observation failure. Each plan selects rows and records inventory from one strict refreshed observation.
+
+`plan-upload` is read-only. It validates absolute regular paths, streams local size and SHA-256 values, lists staged inventory, classifies repeated and already staged names, and writes a version-2 one-use token. It transfers no file handle and sends no extension upload plan. `apply-upload` rechecks the issue, target, page, inventory, and local name, size, and SHA-256 values. It copies the approved bytes to a private snapshot and verifies the snapshot. It then claims and consumes the local token atomically before one transfer. Chrome receives only the verified snapshot. After each ready-panel wait, the extension checks the exact filename again. It records a proved skip and sends no native upload when that filename became staged. It then requests extension authorization and applies the upload.
+
+The snapshot store uses a private per-user root with an owner-only Windows DACL or POSIX mode. It verifies exact root containment, metadata, nonce, deadlines, and no reparse point. A bounded `building` deadline covers construction. A renewed `transferring` lease covers each file-selection call. The store enters `browser_active` before authorization and retains bytes for 150 minutes. The content upload batch has a two-hour total deadline. A proved terminal result removes the snapshot. On uncertainty, a bounded cleaner and a strict startup scavenger remove only exact expired snapshots. They leave active or ambiguous directories unchanged. A cleanup failure adds a warning and does not permit a retry.
+
+Keep the plan's `actionableFiles` as the approved manifest. After apply, run `list`. Require exactly one staged row with the same complete filename and SHA-256 value for each manifest item. Use `verify` only when the local paths are the complete intended replacement set for all staged files.
+
+An error after that transfer without a proved terminal result is `indeterminate`. The CLI does not retry. A proved stopped upload with non-empty `remaining` exits `4`. Run `status` and `list`, then review `uploadedBeforeFailure` with the operator. `verify <absolute paths...>` is read-only and returns `matched`, `mismatched`, `missingRemotely`, and `missingLocally`. A difference returns exit `4`.
+
+Every CLI JSON object has `exitCode` and `exitMeaning`. Delete and download plans include `actionableFiles` records with filename, SHA-256, and size. The human interface keeps its Confirm/Cancel controls. The CLI path does not click them.
+
+For a persistent transport failure, use the `runtime` folder that contains `stdio-proxy.mjs` and run `status.ps1` first. `backend_connected: true` does not prove that the browser lease is free. Run `start-daemon.ps1` only when status confirms `daemon_absent` and local authority permits the start. The CLI accepts the real proxy's exact bounded startup record for this status. Ambiguous child output is `proxy_lifecycle`. For `lease_busy`, preserve an authenticated owner PID. Keep `held_unknown` unknown. Never expose command lines, tokens, or page data. Check the exact owner and liveness. Do not kill or restart a process by count or age. Do not retry an uncertain apply.
 
 Direct current-browser and explicit CDP modes remain available for compatibility. They are not the default and can create another Chrome permission request. For direct current-browser mode, use:
 
@@ -108,7 +129,7 @@ The CLI only accepts an already open allowed issue target. Persistent mode uses 
 
 Treat local CDP access as a trusted local mutation authority. The one-use plan layers prevent accidental, stale, mismatched, and repeated CLI applies. They do not protect against a hostile local process that already controls the same CDP session, because that process can create and apply its own plan.
 
-Each `plan-*` command writes a random, one-use token in the local temporary state file. The extension also returns a short-lived, one-use authorization ID that the CLI keeps only inside that token record and does not print. The plan is bound to the issue ID, target tab ID, exact URL, page title, page-document generation, connection mode, operation, exact requested names, original planned upload `File` objects or staged rows, and a sorted staged-file inventory. `apply-*` rechecks that inventory and consumes both authorization layers before it starts. The JSON result reports `succeeded`, `skipped`, `failed`, and `remaining`. A completed download also reports `archiveFilename` and `downloadId`. The CLI never retries an apply automatically.
+Each `plan-*` command writes a random, one-use token in the local temporary state file. State read-modify-write work uses an exclusive lock and atomic same-volume replacement. Each apply claims its token under the lock before transfer or dispatch. Parallel use of one token can reach mutation at most once. The extension also returns a short-lived, one-use authorization ID that the CLI keeps only inside that token record and does not print. The plan is bound to the issue ID, target tab ID, exact URL, page title, page-document generation, connection mode, operation, exact requested names, original planned upload evidence or staged rows, and a sorted staged-file inventory. `apply-*` rechecks that inventory and consumes both authorization layers before it starts. The JSON result reports `succeeded`, `skipped`, `failed`, and `remaining`. A completed download also reports `archiveFilename` and `downloadId`. The CLI never retries an apply automatically.
 
 For local-only verification, `tests/generate-teal-test-manifest.mjs` can create a manifest with the exact `http://127.0.0.1:8769/issue/*` match and exact loopback host permission. It changes only the generated manifest. The extension source files are unchanged. Do not package that generated manifest.
 
