@@ -54,6 +54,8 @@ After the user selects the session, use exactly one wrapper transport:
 - `-Browser chrome|edge` for direct current-session mode
 - `-CdpEndpoint <loopback-URL>` for an explicit loopback CDP endpoint
 
+The [Chrome DevTools MCP persistent bridge](https://github.com/esmaesx/chrome-devtools-mcp-persistent-bridge) provides the optional persistent Chrome transport. It is in a separate repository. Keep its checkout separate from this repository, and pass the absolute path to its `runtime/stdio-proxy.mjs` file.
+
 The portable wrapper has no default persistent path. The presence of a proxy does not select a browser session. Use persistent mode for work with several commands. Direct mode can cause a local browser permission prompt.
 
 If more than one allowed tab matches the issue, the CLI stops and reports only safe target IDs and titles. It never selects one by itself. Use `--target-id <listed-id>` or wrapper `-TargetId <listed-id>` to select one exact allowed tab.

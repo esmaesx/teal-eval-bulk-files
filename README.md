@@ -78,7 +78,7 @@ If the skill is not kept beside the repository's `extension` directory, set `TEA
 
 The CLI attaches to an already open browser session. It does not launch a browser, log in, or navigate. Select the exact browser or session first. The wrapper then requires exactly one transport: an explicit persistent stdio-proxy path, a current Chrome or Edge session, or an explicit loopback CDP endpoint.
 
-For a user-selected Chrome session with a configured persistent bridge, pass its absolute proxy path. The portable wrapper has no machine-specific default:
+The [Chrome DevTools MCP persistent bridge](https://github.com/esmaesx/chrome-devtools-mcp-persistent-bridge) is an optional transport for a user-selected Chrome session. It is in a separate repository. Keep its checkout separate from this repository, and pass the absolute path to its `runtime/stdio-proxy.mjs` file. The portable wrapper has no machine-specific default:
 
 ```powershell
 & .\skill\scripts\invoke-teal-cli.ps1 `
