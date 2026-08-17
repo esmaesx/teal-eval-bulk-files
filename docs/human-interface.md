@@ -39,7 +39,7 @@ The extension checks the current staged-file API, reads each selected file, and 
 
 If Save As is cancelled or a source file cannot be read, no partial ZIP is saved. The selected rows remain selected for retry.
 
-Rows with the same filename and SHA-256 value are marked as ambiguous. Use the page's native control for those rows.
+Rows with the same filename and SHA-256 value are marked as ambiguous. An agent must never click the page's native **remove** control. Ask the human operator to use that control for those rows.
 
 ## Delete staged files
 

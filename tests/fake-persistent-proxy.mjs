@@ -5,6 +5,16 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 const statePath = process.env.TEAL_FAKE_MCP_STATE;
 if (!statePath) throw new Error("TEAL_FAKE_MCP_STATE is required.");
 
+if (process.env.TEAL_FAKE_STARTUP_MODE === "daemon_absent") {
+  process.stderr.write("command line: node proxy --token must-not-leak\npage data: private-page-data\n");
+  process.stderr.write('{"schema_version":1,"component":"chrome-devtools-persistent-gateway","status":"startup_failed","cause":"daemon_absent","retryable":true}\n');
+  process.exit(17);
+}
+if (process.env.TEAL_FAKE_STARTUP_MODE === "ambiguous_exit") {
+  process.stderr.write("command line: node proxy --token must-not-leak\npage data: private-page-data\n");
+  process.exit(18);
+}
+
 const extensionVersion = JSON.parse(readFileSync(new URL("../extension/manifest.json", import.meta.url), "utf8")).version;
 const toolNames = [
   "allow_remote_debugging", "click", "close_page", "drag", "emulate", "evaluate_script", "fill", "fill_form",
@@ -91,10 +101,10 @@ function success(structuredContent, message = "ok") {
   return { content: [{ type: "text", text: message }], structuredContent };
 }
 
-function failure(message, status = "tool_failed") {
+function failure(message, status = "tool_failed", data = undefined) {
   return {
     content: [{ type: "text", text: message }],
-    structuredContent: { status },
+    structuredContent: { status, ...(data === undefined ? {} : { data }) },
     isError: true
   };
 }
@@ -149,6 +159,10 @@ function classifyNames(inventory, requestedNames, missingReason = "not staged") 
     else actionableNames.push(name);
   }
   return { actionableNames, skipped };
+}
+
+function canonicalInventory(inventory) {
+  return inventory.map((row) => ({ ...row })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right), "en-US"));
 }
 
 function bridgeResult(state, envelope) {
@@ -225,8 +239,10 @@ function bridgeResult(state, envelope) {
       downloadId: state.downloadId
     };
   } else if (command.command === "apply-delete") {
+    const inventoryBefore = canonicalInventory(state.inventory);
     const classified = classifyNames(state.inventory, command.names);
     state.inventory = state.inventory.filter((row) => !classified.actionableNames.includes(row.filename));
+    const inventoryAfter = canonicalInventory(state.inventory);
     result = {
       ok: true,
       issueIdentifier: "TAB-TEST",
@@ -234,7 +250,12 @@ function bridgeResult(state, envelope) {
       succeeded: classified.actionableNames,
       skipped: classified.skipped,
       failed: [],
-      remaining: []
+      remaining: [],
+      inventoryBefore,
+      inventoryAfter,
+      inventory: inventoryAfter,
+      needsReadOnlyList: false,
+      replayAllowed: false
     };
   } else if (command.command === "stop") {
     result = { ok: true, issueIdentifier: "TAB-TEST", stopped: false, activeOperation: "" };
@@ -267,7 +288,7 @@ async function callTool(name, args) {
   if (toolSequence.length === 1 && name !== "select_page") return failure("Call select_page second.");
   if (toolSequence.length >= 2) return failure("One action is allowed per fake proxy session.");
   toolSequence.push(name);
-  if (name === "list_pages") return success({ pages: [state.page] });
+  if (name === "list_pages") return success({ pages: state.page ? [state.page] : [] });
   if (name === "select_page") {
     if (args.pageId !== state.page.id || args.bringToFront !== false) return failure("The wrong page was selected.");
     return success({ pages: [{ ...state.page, selected: true }] });
@@ -322,12 +343,25 @@ process.stdin.on("data", (chunk) => {
     try { request = JSON.parse(line); } catch { process.exit(9); }
     if (!Object.prototype.hasOwnProperty.call(request, "id")) continue;
     const respond = (result) => send({ jsonrpc: "2.0", id: request.id, result });
-    if (request.method === "initialize") {
+    const rpcMode = process.env.TEAL_FAKE_RPC_MODE || (process.env.TEAL_FAKE_DAEMON_DOWN === "1" ? "unknown_internal" : "");
+    if (request.method === "initialize" && rpcMode === "unknown_internal") {
+      send({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: "fake internal failure at https://private.example/path", data: { note: "unknown", secretToken: "must-not-leak", commandLine: "node proxy --token private", pageData: "private-page-data" } } });
+    } else if (request.method === "initialize" && rpcMode === "daemon_absent") {
+      send({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: "fake daemon unavailable", data: { status: "daemon_absent", detail: "The daemon named pipe is absent.", secretToken: "must-not-leak" } } });
+    } else if (request.method === "initialize" && rpcMode === "lease_busy") {
+      send({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: "fake browser transport lease is busy", data: { status: "lease_busy", owner: null } } });
+    } else if (request.method === "initialize") {
       respond({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "1" } });
     } else if (request.method === "tools/list") {
       respond({ tools });
     } else if (request.method === "test/echo") {
       setTimeout(() => respond({ value: request.params.value }), request.params.delay);
+    } else if (request.method === "test/rpc-error") {
+      send({ jsonrpc: "2.0", id: request.id, error: {
+        code: -32603,
+        message: "failed at https://private.example/path\u0000",
+        data: { status: "custom_failure", detail: "safe detail", secretToken: "must-not-leak" }
+      } });
     } else if (request.method === "tools/call") {
       const { name, arguments: args } = request.params;
       const operation = toolSequence.length < 2 ? callTool(name, args) : actionTool(name, args);

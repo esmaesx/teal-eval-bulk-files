@@ -7,7 +7,8 @@
   const REMOVE_PROMPT = "Remove this staged file? Active runs may still reference it.";
   const ISSUE_PATTERN = /^\/issue\/([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\/?$/;
   const UPLOAD_START_TIMEOUT_MS = 10_000;
-  const UPLOAD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+  const UPLOAD_BATCH_TIMEOUT_MS = globalThis.TealEvalUploadLifetime.contentBatchTimeoutMs;
+  const UPLOAD_TIMEOUT_MS = UPLOAD_BATCH_TIMEOUT_MS;
   const UPLOAD_READY_STABLE_MS = 500;
   const UPLOAD_SETTLE_STABLE_MS = 1_500;
   const UPLOAD_SETTLE_TIMEOUT_MS = 30_000;
@@ -30,7 +31,7 @@
   const BRIDGE_PLAN_TTL_MS = 60 * 60 * 1000;
   const BRIDGE_AUTHORIZATION_PATTERN = /^[A-Za-z0-9-]{16,80}$/;
   const PERSISTENT_BRIDGE_PROTOCOL_VERSION = 1;
-  const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.4";
+  const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.6";
   const PERSISTENT_BRIDGE_REQUEST_PATTERN = /^[A-Za-z0-9_-]{16,80}$/;
   const PERSISTENT_BRIDGE_UPLOAD_TTL_MS = 5 * 60 * 1000;
   const PERSISTENT_BRIDGE_RESULT_TTL_MS = 15 * 60 * 1000;
@@ -569,8 +570,7 @@
     return null;
   }
 
-  function readNativeRows() {
-    const panel = findNativePanel();
+  function readNativeRowsFromPanel(panel) {
     if (!panel) return [];
 
     return [...panel.container.querySelectorAll("table tbody tr")].flatMap((tr) => {
@@ -587,6 +587,10 @@
       if (!filename || !removeButton) return [];
       return [{ filename, sizeText, sha256, tr, removeButton, downloadButton }];
     });
+  }
+
+  function readNativeRows() {
+    return readNativeRowsFromPanel(findNativePanel());
   }
 
   function ensureBulkButton() {
@@ -704,8 +708,10 @@
     return new Set(readNativeRows().map((row) => row.filename));
   }
 
-  function classifyUploads(files = selectedUploads) {
-    const existingNames = currentExistingNames();
+  function classifyUploads(files = selectedUploads, observedRows = null) {
+    const existingNames = Array.isArray(observedRows)
+      ? new Set(observedRows.map((row) => row.filename))
+      : currentExistingNames();
     const queuedNames = new Set();
     const uploadable = [];
     const skipped = [];
@@ -865,13 +871,17 @@
     return "Waiting for the Teal page";
   }
 
-  async function waitForNativeReady() {
+  function uploadBatchDeadlineError() {
+    return new Error("The upload batch reached its total two-hour browser deadline. No retry was attempted.");
+  }
+
+  async function waitForNativeReady(batchDeadline) {
     const startedAt = Date.now();
     let readySince = 0;
-    while (Date.now() - startedAt < UPLOAD_START_TIMEOUT_MS) {
+    while (Date.now() - startedAt < UPLOAD_START_TIMEOUT_MS && Date.now() < batchDeadline) {
       const panel = findNativePanel();
       const inputIsReset = panel && !panel.nativeInput.value && (!panel.nativeInput.files || panel.nativeInput.files.length === 0);
-      const isReady = panel && !panel.nativeAddButton.disabled && panel.nativeAddButton.textContent?.trim() === "Add file" && inputIsReset;
+      const isReady = panel && !nativeListIsLoading(panel) && !panel.nativeAddButton.disabled && panel.nativeAddButton.textContent?.trim() === "Add file" && inputIsReset;
       if (isReady) {
         readySince ||= Date.now();
         if (Date.now() - readySince >= UPLOAD_READY_STABLE_MS) return panel;
@@ -880,29 +890,35 @@
       }
       await sleep(150);
     }
+    if (Date.now() >= batchDeadline) throw uploadBatchDeadlineError();
     throw new Error("The page's Add file control and file input did not become stably ready.");
   }
 
-  async function uploadOneFile(file, queueIndex, totalCount) {
-    const panel = await waitForNativeReady();
-    const beforeKeys = new Set(readNativeRows().map(rowKey));
+  async function uploadOneFile(file, queueIndex, totalCount, batchDeadline) {
+    const panel = await waitForNativeReady(batchDeadline);
+    const readyRows = readNativeRowsFromPanel(panel);
+    if (readyRows.some((row) => row.filename === file.name)) {
+      return { skipped: true, reason: "became staged while waiting for the ready panel - skipped" };
+    }
+    const beforeKeys = new Set(readyRows.map(rowKey));
     const transfer = new DataTransfer();
     transfer.items.add(file);
     panel.nativeInput.files = transfer.files;
     panel.nativeInput.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 
     const startedAt = Date.now();
+    const fileDeadline = Math.min(startedAt + UPLOAD_TIMEOUT_MS, batchDeadline);
     let sawBusy = false;
     let readyWithoutRowAt = 0;
     let addedRowSeenAt = 0;
     let settledSince = 0;
     let settledSignature = "";
 
-    while (Date.now() - startedAt < UPLOAD_TIMEOUT_MS) {
+    while (Date.now() < fileDeadline) {
       const currentPanel = findNativePanel();
       if (!currentPanel) throw new Error("The staged-files panel disappeared during upload.");
 
-      const currentRows = readNativeRows();
+      const currentRows = readNativeRowsFromPanel(currentPanel);
       const addedRow = currentRows.find((row) => row.filename === file.name && !beforeKeys.has(rowKey(row)));
       const addText = currentPanel.nativeAddButton.textContent?.trim() || "";
       const isBusy = currentPanel.nativeAddButton.disabled || addText !== "Add file";
@@ -955,11 +971,18 @@
       await sleep(250);
     }
 
+    if (Date.now() >= batchDeadline) throw uploadBatchDeadlineError();
     throw new Error("The upload timed out before the page confirmed the staged file.");
   }
 
   async function startUpload(options = {}) {
-    if (busy) return;
+    if (busy) {
+      if (options.fromBridge) {
+        const remaining = Array.isArray(options.files) ? options.files.map((file) => file.name) : [];
+        return { operation: "upload", succeeded: [], skipped: [], failed: [{ name: "", error: "A bulk operation is already running." }], remaining };
+      }
+      return;
+    }
     renderUploadFiles();
 
     const sourceFiles = Array.isArray(options.files) ? options.files : selectedUploads;
@@ -983,6 +1006,7 @@
     setBusy(true);
     activeOperation = "upload";
     stopAfterCurrent = false;
+    const batchDeadline = Date.now() + UPLOAD_BATCH_TIMEOUT_MS;
     const uploadQueue = [...uploadable];
     let completed = 0;
     let nextIndex = 0;
@@ -1001,7 +1025,14 @@
           continue;
         }
 
-        await uploadOneFile(file, nextIndex, uploadQueue.length);
+        const uploadResult = await uploadOneFile(file, nextIndex, uploadQueue.length, batchDeadline);
+        if (uploadResult?.skipped) {
+          runtimeSkipped += 1;
+          runtimeSkippedEntries.push({ name: file.name, reason: uploadResult.reason });
+          selectedUploads = uploadQueue.slice(nextIndex + 1);
+          renderUploadFiles();
+          continue;
+        }
         completed += 1;
         succeededNames.push(file.name);
         selectedUploads = uploadQueue.slice(nextIndex + 1);
@@ -1014,14 +1045,48 @@
 
       const totalSkipped = skipped.length + runtimeSkipped;
       if (stopAfterCurrent && nextIndex < uploadQueue.length) {
-        setStatus(`Stopped after ${completed} successful file${completed === 1 ? "" : "s"}. ${uploadQueue.length - nextIndex} file${uploadQueue.length - nextIndex === 1 ? "" : "s"} remain selected.${totalSkipped ? ` Skipped ${totalSkipped} duplicate${totalSkipped === 1 ? "" : "s"}.` : ""}`, "success");
-      } else {
-        setStatus(`Uploaded and finalized ${completed} file${completed === 1 ? "" : "s"}.${totalSkipped ? ` Skipped ${totalSkipped} duplicate${totalSkipped === 1 ? "" : "s"}.` : ""}`, "success");
-        ui.fileInput.value = "";
-        selectedUploads = [];
-        ui.uploadAck.checked = false;
-        renderUploadFiles();
+        const remainingNames = selectedUploads.map((file) => file.name);
+        const terminalSkipped = [...skipped.map(({ file, reason }) => ({ name: file.name, reason })), ...runtimeSkippedEntries];
+        setStatus(`Stopped after ${completed} successful file${completed === 1 ? "" : "s"}. ${remainingNames.length} file${remainingNames.length === 1 ? "" : "s"} remain selected.${totalSkipped ? ` Skipped ${totalSkipped} duplicate${totalSkipped === 1 ? "" : "s"}.` : ""}`, "success");
+        if (options.fromBridge) {
+          clearBridgeUploadSelection();
+          if (Array.isArray(options.files)) options.files.length = 0;
+          sourceFiles.length = 0;
+          uploadable.length = 0;
+          uploadQueue.length = 0;
+          skipped.length = 0;
+          const uploadSelectionReleased = selectedUploads.length === 0
+            && (!ui.bridgeUploadInput.files || ui.bridgeUploadInput.files.length === 0)
+            && (!Array.isArray(options.files) || options.files.length === 0)
+            && sourceFiles.length === 0
+            && uploadable.length === 0
+            && uploadQueue.length === 0
+            && skipped.length === 0;
+          if (!uploadSelectionReleased) throw new Error("The stopped CLI upload selection could not be released safely.");
+          return {
+            operation: "upload",
+            stopped: true,
+            uploadSelectionReleased: true,
+            succeeded: succeededNames,
+            skipped: terminalSkipped,
+            failed: [],
+            remaining: remainingNames
+          };
+        }
+        return {
+          operation: "upload",
+          stopped: true,
+          succeeded: succeededNames,
+          skipped: terminalSkipped,
+          failed: [],
+          remaining: remainingNames
+        };
       }
+      setStatus(`Uploaded and finalized ${completed} file${completed === 1 ? "" : "s"}.${totalSkipped ? ` Skipped ${totalSkipped} duplicate${totalSkipped === 1 ? "" : "s"}.` : ""}`, "success");
+      ui.fileInput.value = "";
+      selectedUploads = [];
+      ui.uploadAck.checked = false;
+      renderUploadFiles();
       return {
         operation: "upload",
         succeeded: succeededNames,
@@ -1492,7 +1557,14 @@
   }
 
   async function startDelete(options = {}) {
-    if (busy || (!selectedDeleteKeys.size && !Array.isArray(options.rows))) return;
+    if (busy) {
+      if (options.fromBridge) {
+        const remaining = Array.isArray(options.rows) ? options.rows.map((row) => row.filename) : [];
+        return { operation: "delete", succeeded: [], skipped: [], failed: [{ name: "", error: "A bulk operation is already running." }], remaining };
+      }
+      return;
+    }
+    if (!selectedDeleteKeys.size && !Array.isArray(options.rows)) return;
     refreshRows();
 
     const selected = Array.isArray(options.rows)
@@ -1500,8 +1572,20 @@
       : stagedRows.filter((row) => selectedDeleteKeys.has(rowKey(row)));
     const expectedCount = Array.isArray(options.rows) ? options.rows.length : selectedDeleteKeys.size;
     if (selected.length !== expectedCount) {
+      const unprocessedNames = Array.isArray(options.rows)
+        ? options.rows.map((row) => row.filename)
+        : [...selectedDeleteKeys].map((key) => {
+          try { return JSON.parse(key)[0] || ""; } catch { return ""; }
+        }).filter(Boolean);
+      const error = "The staged-file list changed before deletion. No deletion was dispatched.";
       setStatus("The staged-file list changed. Review the refreshed selection before deletion.", "error");
-      return { operation: "delete", succeeded: [], skipped: [], failed: [{ error: "The staged-file list changed." }], remaining: [] };
+      return {
+        operation: "delete",
+        succeeded: [],
+        skipped: [],
+        failed: unprocessedNames.map((name) => ({ name, error })),
+        remaining: unprocessedNames
+      };
     }
 
     // A CLI apply is already gated by its one-use plan token and exact
@@ -1597,11 +1681,24 @@
     return [...value];
   }
 
-  function publicInventory() {
-    refreshRows();
+  function snapshotPublicInventory() {
     return stagedRows
       .map((row) => ({ filename: row.filename, sha256: row.sha256 || "", sizeText: row.sizeText || "" }))
       .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right), "en-US"));
+  }
+
+  function strictStagedObservation() {
+    const inventory = globalThis.TealEvalDeleteApply.observeReadyInventory({
+      findPanel: findNativePanel,
+      isLoading: nativeListIsLoading,
+      refreshRows,
+      snapshotInventory: snapshotPublicInventory
+    });
+    return { rows: [...stagedRows], inventory };
+  }
+
+  function publicInventory() {
+    return strictStagedObservation().inventory;
   }
 
   function createBridgeAuthorizationId() {
@@ -1767,12 +1864,13 @@
       usedNames.add(name);
       const file = selectedUploads.find((candidate) => candidate.name === name);
       if (!file) {
-        skipped.push({ name, reason: "not selected in the extension file input" });
+        skipped.push({ name, reason: "not selected in the CLI upload selection" });
         continue;
       }
       files.push(file);
     }
-    const classified = classifyUploads(files);
+    const observation = strictStagedObservation();
+    const classified = classifyUploads(files, observation.rows);
     skipped.push(...classified.skipped.map(({ file, reason }) => ({ name: file.name, reason })));
     return {
       operation: "upload",
@@ -1780,7 +1878,7 @@
       files: classified.uploadable,
       actionableNames: classified.uploadable.map((file) => file.name),
       skipped,
-      inventory: publicInventory()
+      inventory: observation.inventory
     };
   }
 
@@ -1789,14 +1887,14 @@
     const usedNames = new Set();
     const rows = [];
     const skipped = [];
-    refreshRows();
+    const observation = strictStagedObservation();
     for (const name of requestedNames) {
       if (usedNames.has(name)) {
         skipped.push({ name, reason: "duplicate requested name" });
         continue;
       }
       usedNames.add(name);
-      const matches = stagedRows.filter((row) => row.filename === name);
+      const matches = observation.rows.filter((row) => row.filename === name);
       if (matches.length === 0) {
         skipped.push({ name, reason: "not staged" });
       } else if (matches.length !== 1 || ambiguousRowKeys.has(rowKey(matches[0]))) {
@@ -1811,7 +1909,7 @@
       rows,
       actionableNames: rows.map((row) => row.filename),
       skipped,
-      inventory: publicInventory()
+      inventory: observation.inventory
     };
   }
 
@@ -1820,14 +1918,14 @@
     const usedNames = new Set();
     const rows = [];
     const skipped = [];
-    refreshRows();
+    const observation = strictStagedObservation();
     for (const name of requestedNames) {
       if (usedNames.has(name)) {
         skipped.push({ name, reason: "duplicate requested name" });
         continue;
       }
       usedNames.add(name);
-      const matches = stagedRows.filter((row) => row.filename === name);
+      const matches = observation.rows.filter((row) => row.filename === name);
       if (matches.length === 0) {
         skipped.push({ name, reason: "not staged" });
       } else if (matches.length !== 1 || ambiguousRowKeys.has(rowKey(matches[0]))) {
@@ -1842,7 +1940,7 @@
       rows,
       actionableNames: rows.map((row) => row.filename),
       skipped,
-      inventory: publicInventory()
+      inventory: observation.inventory
     };
   }
 
@@ -1853,6 +1951,9 @@
       operation: plan.operation,
       requestedNames: plan.requestedNames,
       actionableNames: plan.actionableNames,
+      ...(plan.operation === "download" || plan.operation === "delete"
+        ? { actionableFiles: (plan.rows || []).map((row) => ({ filename: row.filename, sha256: row.sha256 || "", sizeText: row.sizeText || "" })) }
+        : {}),
       skipped: plan.skipped,
       inventory: plan.inventory
     };
@@ -1912,9 +2013,12 @@
     }
     if (command.command === "apply-delete") {
       const plan = bridgePlanStore.consume({ authorizationId: command.authorizationId, operation: "delete", names: command.names });
-      if (!plan.rows.length) return { ...publicPlan(plan), succeeded: [], failed: [], remaining: [] };
-      const result = await startDelete({ rows: plan.rows, fromBridge: true });
-      return { ...publicPlan(plan), ...result, skipped: [...plan.skipped, ...(result?.skipped || [])] };
+      const result = await globalThis.TealEvalDeleteApply.executeDeleteApply({
+        plan,
+        readInventory: publicInventory,
+        startDelete
+      });
+      return { ...publicPlan(plan), ...result, skipped: [...plan.skipped, ...(result.skipped || [])] };
     }
     if (command.command === "apply-download") {
       const plan = bridgePlanStore.consume({ authorizationId: command.authorizationId, operation: "download", names: command.names });

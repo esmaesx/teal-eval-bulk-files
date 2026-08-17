@@ -272,6 +272,9 @@
         document.body.dataset.saveAsZipByteLength = '0';
         document.body.dataset.saveAsZipFirstFourHex = '';
         document.body.dataset.nativeRemovePromptCalls = '0';
+        document.body.dataset.nativeUploadInputChanges = '0';
+        document.body.dataset.nativeUploadFinalizations = '0';
+        document.body.dataset.nativeUploadFinalizedNames = '[]';
 
         function makeHash(name) {
           const knownHashes = {
@@ -287,8 +290,13 @@
           return value.toString(16).padStart(8, '0').repeat(8);
         }
 
-        function addRow(file) {
-          const hash = makeHash(file.name);
+        async function sha256File(file) {
+          const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()));
+          return [...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+        }
+
+        function addRow(file, hashOverride = '') {
+          const hash = hashOverride || makeHash(file.name);
           const tr = document.createElement('tr');
           tr.innerHTML = `<td>${file.name}</td><td>${file.size} B</td><td><span title="${hash}">${hash.slice(0, 8)}</span></td><td><button type="button">download</button><button class="danger" type="button">remove</button></td>`;
           tr.querySelector('button:not(.danger)').addEventListener('click', () => {
@@ -443,6 +451,7 @@
         input.addEventListener('change', () => {
           const file = input.files && input.files[0];
           if (!file) return;
+          document.body.dataset.nativeUploadInputChanges = String(Number(document.body.dataset.nativeUploadInputChanges || '0') + 1);
           nativeError.textContent = '';
           if (simulateRace && Date.now() < pipelineReadyAt) {
             document.body.dataset.prematureAttempts = String(Number(document.body.dataset.prematureAttempts) + 1);
@@ -472,12 +481,21 @@
           addButton.textContent = 'Uploading…';
           window.setTimeout(() => {
             addButton.textContent = 'Finalizing…';
-            window.setTimeout(() => {
-              addRow(file);
-              addButton.textContent = 'Add file';
-              addButton.disabled = false;
-              input.value = '';
-              if (simulateRace) pipelineReadyAt = Date.now() + 1_200;
+            window.setTimeout(async () => {
+              try {
+                addRow(file, await sha256File(file));
+                document.body.dataset.nativeUploadFinalizations = String(Number(document.body.dataset.nativeUploadFinalizations || '0') + 1);
+                const finalizedNames = JSON.parse(document.body.dataset.nativeUploadFinalizedNames || '[]');
+                finalizedNames.push(file.name);
+                document.body.dataset.nativeUploadFinalizedNames = JSON.stringify(finalizedNames);
+                if (simulateRace) pipelineReadyAt = Date.now() + 1_200;
+              } catch (error) {
+                nativeError.textContent = error instanceof Error ? error.message : String(error);
+              } finally {
+                addButton.textContent = 'Add file';
+                addButton.disabled = false;
+                input.value = '';
+              }
             }, 120);
           }, 120);
         });
@@ -496,7 +514,7 @@
               new File(['gamma'], 'existing-gamma.json', { type: 'application/json' }),
               new File(['delta'], 'existing-delta.md', { type: 'text/markdown' })
             ];
-        initialFiles.forEach(addRow);
+        initialFiles.forEach((file) => addRow(file));
         if (params.get('duplicateRows') === '1') {
           addRow(new File(['alpha'], 'existing-alpha.txt', { type: 'text/plain' }));
         }

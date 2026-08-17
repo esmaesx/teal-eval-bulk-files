@@ -4,10 +4,31 @@ The CLI lets a terminal, Codex, Claude, or another local agent manage staged fil
 
 ![Fictional plan and apply output](images/cli-plan-example.png)
 
+## Start with a batch
+
+Use one plan for all requested files. The wrapper accepts `-Files`, `-Paths`, and `-Names` as aliases for operands. It accepts `-PlanToken` for an apply token.
+
+```powershell
+$plan = & .\skill\scripts\invoke-teal-cli.ps1 `
+  -Browser edge -Issue DEMO-204 -Command plan-upload `
+  -Files "C:\work\new-evidence.csv","C:\work\notes.txt" | ConvertFrom-Json
+
+$plan.actionableFiles
+
+& .\skill\scripts\invoke-teal-cli.ps1 `
+  -Browser edge -Issue DEMO-204 -Command apply-upload `
+  -PlanToken $plan.token
+
+$after = & .\skill\scripts\invoke-teal-cli.ps1 `
+  -Browser edge -Issue DEMO-204 -Command list | ConvertFrom-Json
+```
+
+Keep `actionableFiles` as the approved manifest. After apply, run `list`. For each manifest item, require exactly one row with the same complete filename and SHA-256 value. A missing, changed, or repeated row is a failure. Use `verify` only when the local paths are the complete intended replacement set for all staged files.
+
 ## Requirements
 
 - Node.js 24
-- Teal Eval Bulk Files `0.9.4` loaded unpacked in Chrome or Microsoft Edge
+- Teal Eval Bulk Files `0.9.6` loaded unpacked in Chrome or Microsoft Edge
 - An open Teal Alpha issue tab
 - The selected browser's protected local debugging bridge enabled
 
@@ -33,7 +54,9 @@ After the user selects the session, use exactly one wrapper transport:
 - `-Browser chrome|edge` for direct current-session mode
 - `-CdpEndpoint <loopback-URL>` for an explicit loopback CDP endpoint
 
-The portable wrapper has no default persistent path. The presence of a proxy does not select a browser session.
+The portable wrapper has no default persistent path. The presence of a proxy does not select a browser session. Use persistent mode for work with several commands. Direct mode can cause a local browser permission prompt.
+
+If more than one allowed tab matches the issue, the CLI stops and reports only safe target IDs and titles. It never selects one by itself. Use `--target-id <listed-id>` or wrapper `-TargetId <listed-id>` to select one exact allowed tab.
 
 ## Read-only commands
 
@@ -52,7 +75,18 @@ For direct current-session mode:
 & .\skill\scripts\invoke-teal-cli.ps1 -Browser edge -Issue DEMO-204 -Command list
 ```
 
-`status` reports extension readiness and the active operation. `list` returns the sorted staged-file inventory.
+`status` reports extension readiness and the active operation. `list` returns the sorted staged-file inventory. `list`, all three plan commands, and `verify` require a present staged-files panel that is not loading. A present ready panel with no rows is a valid empty inventory. A missing or loading panel is an observation failure. Each plan selects its rows and records its inventory from one strict refreshed observation.
+
+`verify` is also read-only. Use it only for a complete intended replacement set. It needs absolute local file paths and compares the complete local set with all staged inventory. For a partial upload, compare the plan's `actionableFiles` with a new `list` result instead.
+
+```powershell
+& .\skill\scripts\invoke-teal-cli.ps1 `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command verify `
+  -Operands "C:\work\evidence.csv"
+```
+
+It reports `matched`, `mismatched`, `missingRemotely`, and `missingLocally`. Exit `4` means that the exact sets do not match.
 
 An explicit loopback endpoint can be used instead of current-session mode:
 
@@ -68,7 +102,9 @@ An explicit loopback endpoint can be used instead of current-session mode:
   -Operands "C:\work\new-evidence.csv","C:\work\notes.txt"
 ```
 
-Show the returned actionable and skipped names. If the user requested that exact upload, apply the returned one-use token:
+`plan-upload` is read-only. It accepts only absolute safe regular file paths. It streams each local size and SHA-256 value, lists staged inventory, and classifies repeated requested names and already staged names. It creates a local version-2 one-use token. It does not transfer a file handle and does not ask the extension for upload authorization.
+
+Show the returned `actionableNames`, `actionableFiles`, and `skipped` values. Keep the complete filename and SHA-256 values in `actionableFiles` as the post-apply check manifest. If the user requested that exact upload, apply the returned one-use token:
 
 ```powershell
 & .\skill\scripts\invoke-teal-cli.ps1 `
@@ -76,7 +112,13 @@ Show the returned actionable and skipped names. If the user requested that exact
   -Operands "<one-use-token>"
 ```
 
-The apply command uses the exact `File` objects from the plan, rechecks the staged inventory, consumes both authorization layers, and starts without a visual Confirm click.
+`apply-upload` rechecks the exact issue, target, URL, page, staged inventory, and local name, size, and SHA-256 values. It copies the approved bytes to a private per-apply snapshot and verifies the snapshot against the planned name, size, and SHA-256 value. It then claims and consumes the local token with an exclusive local state lock before one file transfer. Chrome receives the verified snapshot path, so a later change to the original path cannot change the upload bytes. Before each native upload dispatch, the extension waits for a ready panel and checks the exact filename again. If the filename became staged, it records a proved skip and sends no upload for that file. The human interface keeps its Confirm/Cancel controls; the CLI does not click them.
+
+The snapshot root is private to the current user. The store verifies an owner-only Windows DACL or POSIX mode, exact root containment, metadata, nonce, deadlines, and no reparse point. Construction has a bounded `building` deadline. Each file-selection call renews a bounded `transferring` lease. After all transfers, the store enters `browser_active` before authorization and keeps the verified bytes for 150 minutes. The content upload batch has a two-hour total deadline. A proved terminal result removes the snapshot. On uncertainty, a bounded cleaner keeps it through the possible browser lifetime. A later CLI start removes only an exact expired snapshot. It does not remove an active or ambiguous directory. A cleaner start or delete failure adds a structured warning. It does not permit an apply retry.
+
+After apply, run `list`. Require one exact filename and SHA-256 match for every `actionableFiles` item.
+
+An error after transfer without a proved terminal result is `indeterminate`. Do not retry. Run `status` and `list`, then review `uploadedBeforeFailure` with the operator before any new plan. A proved stop or partial result has complete terminal arrays and exits `4`. It is not indeterminate unless the result says that its state is uncertain.
 
 ## Download with a two-phase plan
 
@@ -116,6 +158,10 @@ Show the exact actionable names. Apply only the matching user-requested plan:
 
 The five-second stop delay starts when apply begins.
 
+The plan result includes `actionableFiles`. Each item has an exact filename, SHA-256 value, and size. Before a fresh delete plan, offer and recommend a separate exact-name `plan-download` and `apply-download` backup. If the backup is cancelled or uncertain, do not delete unless the user explicitly declines that backup.
+
+Never click the page's native **remove** control. If duplicate rows are ambiguous, ask the human operator to use that native control.
+
 ## Stop
 
 ```powershell
@@ -133,10 +179,14 @@ Every command writes one JSON object to stdout. Apply results report these array
 - `failed`: names that reported an operation failure
 - `remaining`: names not started or not completed
 
+Every JSON object also has `exitCode` and `exitMeaning`. They match the process exit code and its meaning.
+
 Download results also return:
 
 - `archiveFilename`: the generated ZIP filename
 - `downloadId`: the identifier returned for the ZIP download
+
+Delete apply requires a present staged-files panel that is not loading for both inventory observations. A present panel with no rows is a valid empty inventory. A missing or loading panel before delete causes zero delete dispatch. Delete apply results return `inventoryBefore`, `inventoryAfter`, and `inventory`. The `inventory` field is an alias for `inventoryAfter`. If post-operation observation fails, both after fields are null, the terminal arrays remain, the result is indeterminate, and `inventoryObservationError` tells you to run a read-only `list`. Do not replay the apply.
 
 Exit codes are:
 
@@ -147,13 +197,31 @@ Exit codes are:
 
 ## Failure recovery
 
-Do not retry an uncertain `apply-upload`, `apply-download`, or `apply-delete`. Plan tokens are consumed before the operation call. A timeout, closed transport, `indeterminate: true`, or missing final JSON makes the result uncertain.
+Do not retry an uncertain `apply-upload`, `apply-download`, or `apply-delete`. A timeout, closed transport, direct bridge exception after dispatch, `indeterminate: true`, or missing final JSON makes the result uncertain. Every apply claims and consumes its token atomically before transfer or operation dispatch. Parallel processes cannot use the same token twice. A concurrent local state lock fails closed; do not remove an invalid or stale lock without strict owner, liveness, and time proof.
 
 1. Run `status`.
 2. Run `list`.
 3. Compare the current staged inventory with the requested operation.
 4. For an uncertain download, do not infer whether Save As completed from the staged inventory.
 5. Report succeeded, skipped, failed, remaining, and any uncertainty.
-6. Create a new plan only with fresh user authority.
+6. Create a new plan only with fresh user authority. Never replay the consumed apply token.
+
+For an upload error after transfer, also review `uploadedBeforeFailure`. Do not infer success from this field. It is an observed exact name and SHA-256 match only.
+
+## Persistent daemon preflight
+
+The `runtime` folder contains the selected `stdio-proxy.mjs` file. Use this recovery order:
+
+1. Run `runtime\status.ps1`.
+2. Read `errorKind`. The stable values are `daemon_absent`, `lease_busy`, `daemon_timeout`, `proxy_lifecycle`, `rpc_error`, `no_matching_tab`, and `generic_bridge_error`.
+3. Do not use `backend_connected: true` as proof that the browser lease is free.
+4. Run `runtime\start-daemon.ps1` only when status confirms `daemon_absent` and local authority permits the start.
+5. For `lease_busy`, use an authenticated `owner_pid` when the result has one. Do not report that known owner as unknown. For `held_unknown`, or when no authenticated PID exists, report that the owner is unknown. Do not print owner command lines, tokens, or page data. Check the exact owner and liveness. Do not kill or restart a process by count or age.
+6. For an uncertain apply, run read-only `status` and `list`. Do not retry, kill, or restart as a response to that apply.
+7. Run a new command only after the operator confirms the transport state.
+
+The CLI recognizes `daemon_absent` only from the real proxy's bounded, exact startup-failure record or an authenticated structured bridge result. Malformed or ambiguous child output stays `proxy_lifecycle`. The CLI does not start the daemon and does not retry a failed command automatically.
 
 Never print browser WebSocket paths, extension authorization IDs, cookies, or unrelated tab URLs.
+
+The current human interface already shows SHA-256 prefixes in delete review and per-file progress during batch work. Version 0.9.6 has no visual interface change.

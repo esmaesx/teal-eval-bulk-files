@@ -5,7 +5,7 @@ import { basename, isAbsolute, resolve } from "node:path";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const PERSISTENT_BRIDGE_PROTOCOL_VERSION = 1;
-const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.4";
+const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.6";
 const REQUEST_PATTERN = /^[A-Za-z0-9_-]{16,80}$/;
 const DOCUMENT_PATTERN = /^[A-Za-z0-9-]{16,80}$/;
 const RESULT_PREFIX = "TEAL_CLI_RESULT_";
@@ -15,6 +15,7 @@ const UPLOAD_CONTROL_NAME = "Teal CLI persistent upload";
 const MAX_STDOUT_BUFFER = 8 * 1024 * 1024;
 const MAX_STDERR_BUFFER = 16 * 1024;
 const MAX_MARKER_LENGTH = 1024 * 1024;
+const TARGET_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
 const EXPECTED_GATEWAY_TOOLS = new Set([
   "allow_remote_debugging", "click", "close_page", "drag", "emulate", "evaluate_script", "fill", "fill_form",
@@ -37,26 +38,136 @@ function exactKeys(value, keys) {
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-function sleep(milliseconds) {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+function sanitizeDiagnosticText(value, fallback = "The persistent Chrome tool failed.") {
+  return String(value || fallback)
+    .replace(/\b(?:https?|chrome|edge|devtools|ws|wss):\/\/\S+/giu, "[url]")
+    .replace(/--?(?:token|secret|cookie|authorization|credential|password)\b(?:=|\s+)\S+/giu, "[redacted]")
+    .replace(/\b(?:command(?:[ _-]?line)?|argv|page[ _-]?data)\s*[:=]\s*[^\r\n]*/giu, "[redacted]")
+    .replace(/[\u0000-\u001f\u007f]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .slice(0, 2_000) || fallback;
+}
+
+function sanitizeStructuredData(value, depth = 0, seen = new Set()) {
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "string") return sanitizeDiagnosticText(value, "").slice(0, 500);
+  if (!value || typeof value !== "object" || depth >= 5 || seen.has(value)) return undefined;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.slice(0, 25).map((item) => sanitizeStructuredData(item, depth + 1, seen)).filter((item) => item !== undefined);
+  }
+  const result = {};
+  for (const [key, item] of Object.entries(value).slice(0, 25)) {
+    if (/token|secret|cookie|authorization|credential|password|websocket|header|command|argv|argument|page|tab|target|snapshot|html|selector/iu.test(key)) {
+      result[key] = "[redacted]";
+      continue;
+    }
+    const sanitized = sanitizeStructuredData(item, depth + 1, seen);
+    if (sanitized !== undefined) result[key] = sanitized;
+  }
+  return result;
 }
 
 function errorText(result) {
   const structured = result?.structuredContent;
-  if (typeof structured?.detail === "string") return structured.detail;
+  if (typeof structured?.detail === "string") return sanitizeDiagnosticText(structured.detail);
   const text = Array.isArray(result?.content)
     ? result.content.find((item) => item?.type === "text" && typeof item.text === "string")?.text
     : "";
-  return String(text || "The persistent Chrome tool failed.").slice(0, 2_000);
+  return sanitizeDiagnosticText(text);
 }
 
 class McpToolError extends Error {
   constructor(message, options = {}) {
-    super(message);
+    super(sanitizeDiagnosticText(message));
     this.name = "McpToolError";
     this.status = options.status || "tool_failed";
+    this.data = sanitizeStructuredData(options.data);
     this.indeterminate = options.indeterminate === true;
   }
+}
+
+class McpRpcError extends Error {
+  constructor(rpcError, method = "") {
+    const code = Number.isInteger(rpcError?.code) ? rpcError.code : null;
+    const rpcMessage = sanitizeDiagnosticText(rpcError?.message, "The JSON-RPC request failed.");
+    super(`The persistent Chrome proxy rejected the request (${code ?? "error"}): ${rpcMessage}`);
+    this.name = "McpRpcError";
+    this.rpcCode = code;
+    this.rpcMessage = rpcMessage;
+    this.rpcData = sanitizeStructuredData(rpcError?.data);
+    this.data = this.rpcData;
+    this.status = typeof this.rpcData?.status === "string" ? this.rpcData.status : "rpc_error";
+    this.method = method;
+    this.errorKind = "rpc_error";
+  }
+}
+
+function proxyLifecycleError(message) {
+  const error = new Error(sanitizeDiagnosticText(message));
+  error.errorKind = "proxy_lifecycle";
+  error.status = "proxy_lifecycle";
+  return error;
+}
+
+function proxyCloseError(stderr, code, signal, startup) {
+  const evidence = String(stderr || "").slice(-MAX_STDERR_BUFFER);
+  let startupMarker = null;
+  if (startup) {
+    const lines = evidence.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+    const lastLine = lines.at(-1) || "";
+    try {
+      const parsed = JSON.parse(lastLine);
+      const keys = isPlainObject(parsed) ? Object.keys(parsed).sort().join(",") : "";
+      if (keys === "cause,component,retryable,schema_version,status"
+        && parsed.schema_version === 1
+        && parsed.component === "chrome-devtools-persistent-gateway"
+        && parsed.status === "startup_failed"
+        && parsed.retryable === true
+        && typeof parsed.cause === "string") startupMarker = parsed;
+    } catch { }
+  }
+  const daemonAbsent = startupMarker?.cause === "daemon_absent";
+  if (daemonAbsent) {
+    const error = new Error("The persistent Chrome daemon is absent.");
+    error.errorKind = "daemon_absent";
+    error.status = "daemon_absent";
+    error.data = { status: "daemon_absent", startupExit: Number.isInteger(code) ? code : (signal ? "signal" : "unknown") };
+    return error;
+  }
+  const exit = Number.isInteger(code) ? String(code) : (signal ? "signal" : "unknown");
+  return proxyLifecycleError(`The persistent Chrome proxy closed before the request finished (${exit}).`);
+}
+
+function daemonTimeoutError(message, method = "") {
+  const error = new Error(sanitizeDiagnosticText(message));
+  error.errorKind = "daemon_timeout";
+  error.status = "daemon_timeout";
+  error.method = method;
+  return error;
+}
+
+function childExited(child) {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForChildExit(child, timeoutMs) {
+  if (childExited(child)) return Promise.resolve(true);
+  return new Promise((resolveExit) => {
+    let settled = false;
+    const finish = (exited) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener?.("exit", onExit);
+      resolveExit(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(childExited(child)), timeoutMs);
+    child.once("exit", onExit);
+  });
 }
 
 class McpStdioSession {
@@ -69,6 +180,10 @@ class McpStdioSession {
     this.stdoutBuffer = "";
     this.stderrBuffer = "";
     this.closed = false;
+    this.starting = true;
+    this.shutdownGraceMs = Number.isInteger(options.shutdownGraceMs) && options.shutdownGraceMs >= 1 ? options.shutdownGraceMs : 2_000;
+    this.shutdownTermMs = Number.isInteger(options.shutdownTermMs) && options.shutdownTermMs >= 1 ? options.shutdownTermMs : 2_000;
+    this.shutdownResult = null;
   }
 
   static async open(proxyPath, options = {}) {
@@ -87,9 +202,9 @@ class McpStdioSession {
     try {
       stat = await lstat(this.proxyPath);
     } catch {
-      throw new Error("The persistent Chrome stdio proxy was not found.");
+      throw proxyLifecycleError("The persistent Chrome stdio proxy was not found.");
     }
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("The persistent Chrome stdio proxy was not a safe regular file.");
+    if (!stat.isFile() || stat.isSymbolicLink()) throw proxyLifecycleError("The persistent Chrome stdio proxy was not a safe regular file.");
     this.child = this.spawnProcess(process.execPath, [this.proxyPath, "chrome-devtools"], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -101,9 +216,9 @@ class McpStdioSession {
     this.child.stderr.on("data", (chunk) => {
       this.stderrBuffer = `${this.stderrBuffer}${chunk}`.slice(-MAX_STDERR_BUFFER);
     });
-    this.child.once("error", (error) => this.failPending(new Error(`The persistent Chrome proxy did not start: ${error.message}`)));
-    this.child.once("exit", (code, signal) => {
-      if (!this.closed) this.failPending(new Error(`The persistent Chrome proxy closed before the request finished (${signal || code || "unknown"}).`));
+    this.child.once("error", () => this.failPending(proxyLifecycleError("The persistent Chrome proxy process did not start.")));
+    this.child.once("close", (code, signal) => {
+      if (!this.closed) this.failPending(proxyCloseError(this.stderrBuffer, code, signal, this.starting));
     });
     const initialized = await this.request("initialize", {
       protocolVersion: MCP_PROTOCOL_VERSION,
@@ -114,6 +229,7 @@ class McpStdioSession {
     this.notify("notifications/initialized", {});
     const manifest = await this.request("tools/list", {}, 20_000);
     this.validateToolManifest(manifest?.tools);
+    this.starting = false;
   }
 
   validateToolManifest(tools) {
@@ -183,7 +299,7 @@ class McpStdioSession {
       if (!pending) continue;
       this.pending.delete(String(message.id));
       clearTimeout(pending.timer);
-      if (message.error) pending.reject(new Error(`The persistent Chrome proxy rejected the request (${message.error.code ?? "error"}).`));
+      if (message.error) pending.reject(new McpRpcError(message.error, pending.method));
       else pending.resolve(message.result);
     }
   }
@@ -197,7 +313,7 @@ class McpStdioSession {
   }
 
   send(message) {
-    if (!this.child || this.closed || this.child.stdin.destroyed) throw new Error("The persistent Chrome proxy session is closed.");
+    if (!this.child || this.closed || this.child.stdin.destroyed) throw proxyLifecycleError("The persistent Chrome proxy session is closed.");
     this.child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
@@ -210,9 +326,9 @@ class McpStdioSession {
     return new Promise((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         this.pending.delete(String(id));
-        rejectRequest(new Error(`The persistent Chrome proxy timed out during ${method}.`));
+        rejectRequest(daemonTimeoutError(`The persistent Chrome proxy timed out during ${method}.`, method));
       }, timeoutMs);
-      this.pending.set(String(id), { resolve: resolveRequest, reject: rejectRequest, timer });
+      this.pending.set(String(id), { resolve: resolveRequest, reject: rejectRequest, timer, method });
       try {
         this.send({ jsonrpc: "2.0", id, method, params });
       } catch (error) {
@@ -227,26 +343,43 @@ class McpStdioSession {
     const result = await this.request("tools/call", { name, arguments: args }, timeoutMs);
     if (result?.isError === true) {
       const status = typeof result?.structuredContent?.status === "string" ? result.structuredContent.status : "tool_failed";
-      throw new McpToolError(errorText(result), { status, indeterminate: status === "indeterminate_mutating_call" });
+      throw new McpToolError(errorText(result), {
+        status,
+        data: result.structuredContent?.data ?? result.structuredContent,
+        indeterminate: status === "indeterminate_mutating_call"
+      });
     }
     if (!isPlainObject(result)) throw new Error(`The persistent Chrome proxy returned an invalid ${name} result.`);
     return result;
   }
 
   async close() {
-    if (this.closed) return;
+    if (this.closed) return this.shutdownResult;
     this.closed = true;
-    this.failPending(new Error("The persistent Chrome proxy session closed."));
+    this.failPending(proxyLifecycleError("The persistent Chrome proxy session closed."));
     const child = this.child;
-    if (!child) return;
+    if (!child) {
+      this.shutdownResult = { exited: true, signalSent: false };
+      return this.shutdownResult;
+    }
     try { child.stdin.end(); } catch { }
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    await Promise.race([
-      new Promise((resolveExit) => child.once("exit", resolveExit)),
-      sleep(2_000).then(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      })
-    ]);
+    if (childExited(child) || await waitForChildExit(child, this.shutdownGraceMs)) {
+      this.shutdownResult = { exited: true, signalSent: false };
+      return this.shutdownResult;
+    }
+    let signalSent = false;
+    try { signalSent = child.kill("SIGTERM") !== false; } catch { }
+    if (childExited(child) || await waitForChildExit(child, this.shutdownTermMs)) {
+      this.shutdownResult = { exited: true, signalSent };
+      return this.shutdownResult;
+    }
+    const error = proxyLifecycleError("The persistent Chrome proxy did not exit after SIGTERM.");
+    try { child.stdin.destroy?.(); } catch { }
+    try { child.stdout?.destroy?.(); } catch { }
+    try { child.stderr?.destroy?.(); } catch { }
+    try { child.unref?.(); } catch { }
+    this.shutdownResult = { exited: false, signalSent, error };
+    return this.shutdownResult;
   }
 }
 
@@ -261,6 +394,32 @@ function issueFromTargetUrl(raw) {
   } catch {
     return "";
   }
+}
+
+function sanitizedPageDescriptors(pages) {
+  return pages.map((page) => ({
+    targetId: String(page?.id ?? "").slice(0, 128),
+    title: (String(page?.title || "")
+      .replace(/\b(?:https?|chrome|edge|devtools):\/\/\S+/giu, "[url]")
+      .replace(/[\u0000-\u001f\u007f]/gu, " ")
+      .trim()
+      .slice(0, 160) || "(untitled)")
+  }));
+}
+
+function selectAllowedPage(pages, issueIdentifier, requestedTargetId = "") {
+  const allowed = pages.filter((page) => issueFromTargetUrl(page?.url) === issueIdentifier && TARGET_ID_PATTERN.test(String(page?.id ?? "")));
+  const selected = requestedTargetId ? allowed.filter((page) => String(page.id) === requestedTargetId) : allowed;
+  if (selected.length === 1) return selected[0];
+  if (!selected.length) {
+    const error = new Error("The browser transport responded, but the required allowed issue tab is not open. No mutation started.");
+    error.errorKind = "no_matching_tab";
+    error.status = "no_matching_tab";
+    error.transportResponded = true;
+    error.mutationStarted = false;
+    throw error;
+  }
+  throw new Error(`More than one matching allowed issue tab is open (${selected.length}). Matching targets: ${JSON.stringify(sanitizedPageDescriptors(selected))}`);
 }
 
 function parsePageListResult(result) {
@@ -375,6 +534,8 @@ class PersistentBridgeClient {
     this.issueIdentifier = issueIdentifier;
     this.sessionOptions = options.sessionOptions || {};
     this.targetId = "";
+    this.requestedTargetId = options.targetId || "";
+    if (this.requestedTargetId && !TARGET_ID_PATTERN.test(this.requestedTargetId)) throw new Error("The persistent Chrome target identifier was invalid.");
     this.targetUrl = "";
     this.targetTitle = "";
     this.documentId = "";
@@ -389,9 +550,7 @@ class PersistentBridgeClient {
   async selectExpectedPage(session) {
     const listed = await session.callTool("list_pages", {}, 45_000);
     const pages = parsePageListResult(listed);
-    const matches = pages.filter((page) => issueFromTargetUrl(page?.url) === this.issueIdentifier && (typeof page?.id === "string" || Number.isSafeInteger(page?.id)));
-    if (matches.length !== 1) throw new Error(matches.length ? "More than one matching allowed issue tab is open." : "No matching allowed issue tab is already open.");
-    const page = matches[0];
+    const page = selectAllowedPage(pages, this.issueIdentifier, this.requestedTargetId);
     const pageIdValue = Number(page.id);
     const pageId = String(pageIdValue);
     const pageUrl = String(page.url || "");
@@ -477,6 +636,7 @@ class PersistentBridgeClient {
     const value = JSON.stringify(this.envelope(requestId, command, initial));
     if (value.length > 262_144) throw new Error("The persistent bridge command was too large.");
     const isApply = command.command === "apply-upload" || command.command === "apply-download" || command.command === "apply-delete";
+    const indeterminateOnDispatch = isApply || options.indeterminateOnDispatch === true;
     let dispatched = false;
     try {
       await this.performTool("fill", { uid: commandUid, value, includeSnapshot: false }, Math.max(70_000, value.length * 12));
@@ -486,7 +646,7 @@ class PersistentBridgeClient {
         await this.confirmDispatchAfterIndeterminate(requestId, Date.now() + 30_000);
         dispatched = true;
       } catch (confirmationError) {
-        if (isApply) {
+        if (indeterminateOnDispatch) {
           confirmationError.indeterminate = true;
           confirmationError.message = `The apply dispatch is indeterminate. ${confirmationError.message}`;
           throw confirmationError;
@@ -497,7 +657,7 @@ class PersistentBridgeClient {
     try {
       return await this.waitForTerminalResult(requestId, command.command, options.timeoutMs || 30_000);
     } catch (error) {
-      if (isApply && dispatched && error?.confirmedTerminal !== true) {
+      if (indeterminateOnDispatch && dispatched && error?.confirmedTerminal !== true) {
         error.indeterminate = true;
         error.message = `The apply request may still be running. ${error.message}`;
       }
@@ -516,13 +676,14 @@ class PersistentBridgeClient {
     return this;
   }
 
-  async uploadFiles(filePaths) {
-    if (!Array.isArray(filePaths) || !filePaths.length) throw new Error("plan-upload requires at least one local file path.");
+  async uploadFiles(filePaths, { beforeFileSelection, afterFileSelection } = {}) {
+    if (!Array.isArray(filePaths) || !filePaths.length) throw new Error("apply-upload requires at least one local file path.");
     const resolvedPaths = [];
     const names = [];
     const nameKeys = new Set();
     for (const filePath of filePaths) {
-      const absolute = isAbsolute(filePath) ? resolve(filePath) : resolve(process.cwd(), filePath);
+      if (!isAbsolute(filePath)) throw new Error("Upload paths must be absolute local file paths.");
+      const absolute = resolve(filePath);
       const stat = await lstat(absolute).catch(() => null);
       if (!stat || !stat.isFile() || stat.isSymbolicLink()) throw new Error(`The upload path was not a safe regular file: ${absolute}`);
       const name = basename(absolute);
@@ -533,11 +694,13 @@ class PersistentBridgeClient {
       names.push(name);
     }
     const prepared = await this.callBridge({ command: "prepare-upload" }, { timeoutMs: 30_000 });
-    if (prepared.result?.ok !== true) throw new Error(prepared.result?.error || "The extension did not prepare the persistent upload input.");
+    if (prepared.result?.ok !== true) throw new Error(prepared.result?.error || "The extension did not prepare the CLI upload selection.");
     try {
       for (const filePath of resolvedPaths) {
         const uploadUid = await this.resolveControlUid(UPLOAD_CONTROL_NAME);
+        if (typeof beforeFileSelection === "function") await beforeFileSelection(filePath);
         await this.performTool("upload_file", { uid: uploadUid, filePath, includeSnapshot: false }, 70_000);
+        if (typeof afterFileSelection === "function") await afterFileSelection(filePath);
       }
       return names;
     } catch (error) {
@@ -555,6 +718,7 @@ export {
   ACK_PREFIX,
   COMMAND_CONTROL_NAME,
   EXPECTED_GATEWAY_TOOLS,
+  McpRpcError,
   McpStdioSession,
   McpToolError,
   PERSISTENT_BRIDGE_EXTENSION_VERSION,
@@ -566,5 +730,10 @@ export {
   findUniqueUid,
   findUniqueUidInToolResult,
   issueFromTargetUrl,
-  parsePageListResult
+  parsePageListResult,
+  sanitizeDiagnosticText,
+  sanitizeStructuredData,
+  proxyCloseError,
+  sanitizedPageDescriptors,
+  selectAllowedPage
 };
