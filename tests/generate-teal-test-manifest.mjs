@@ -6,12 +6,14 @@ import { resolve } from "node:path";
 const extensionRoot = resolve(import.meta.dirname, "..", "extension");
 const productionPath = resolve(extensionRoot, "manifest.json");
 const outputPath = process.argv[2];
+const releaseVersion = "0.9.7";
 
 if (!outputPath) {
   process.stderr.write("Usage: node generate-teal-test-manifest.mjs <output-manifest-path>\n");
   process.exitCode = 2;
 } else {
   const manifest = JSON.parse(await readFile(productionPath, "utf8"));
+  if (manifest.version !== releaseVersion) throw new Error(`Expected extension release ${releaseVersion}.`);
   const localMatch = "http://127.0.0.1:8769/issue/*";
   manifest.host_permissions = [...new Set([...(manifest.host_permissions || []), "http://127.0.0.1:8769/*"])];
   manifest.content_scripts = (manifest.content_scripts || []).map((script) => ({

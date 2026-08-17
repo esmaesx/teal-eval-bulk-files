@@ -46,11 +46,13 @@ function parseOnlyJson(stdout) {
 test("PowerShell wrapper source preserves aliases, transport parameter sets, and the version gate", async () => {
   const wrapperSource = await readFile(wrapperPath, "utf8");
   assert.match(wrapperSource, /Mandatory\s*=\s*\$true,\s*ParameterSetName\s*=\s*'PersistentBridge'[\s\S]*?\$PersistentBridgePath/u);
+  assert.match(wrapperSource, /ParameterSetName\s*=\s*'PersistentBridge'[\s\S]*?ValidateRange\(1,\s*300\)[\s\S]*?\$BridgeWaitSeconds\s*=\s*120/u);
   assert.match(wrapperSource, /ParameterSetName\s*=\s*'Cdp'[\s\S]*?\$CdpEndpoint/u);
   assert.match(wrapperSource, /ParameterSetName\s*=\s*'Browser'[\s\S]*?\$Browser/u);
   assert.match(wrapperSource, /\[Alias\('Names',\s*'Files',\s*'Paths',\s*'PlanToken'\)\][\s\S]*?\$Operands/u);
-  assert.match(wrapperSource, /\$manifest\.version\s*-ne\s*'0\.9\.6'/u);
+  assert.match(wrapperSource, /\$manifest\.version\s*-ne\s*'0\.9\.7'/u);
   assert.match(wrapperSource, /'--persistent-bridge',\s*\$resolvedPersistentBridgePath/u);
+  assert.match(wrapperSource, /'--bridge-wait-seconds',\s*\[string\]\$BridgeWaitSeconds/u);
   assert.match(wrapperSource, /'--target-id',\s*\$TargetId/u);
   assert.match(wrapperSource, /TryCreate\(\$PersistentBridgePath,\s*\[UriKind\]::Absolute/u);
 });
@@ -67,7 +69,8 @@ test("PowerShell wrapper preserves persistent mapping, parameter sets, version g
       "-PersistentBridgePath", fakeProxyPath,
       "-Issue", "TAB-TEST",
       "-ExtensionRoot", extensionRoot,
-      "-StatePath", statePath
+      "-StatePath", statePath,
+      "-BridgeWaitSeconds", "7"
     ];
 
     const status = await runPowerShell([...common, "-Command", "status"], { TEAL_FAKE_MCP_STATE: fakeStatePath });
@@ -80,6 +83,7 @@ test("PowerShell wrapper preserves persistent mapping, parameter sets, version g
     const fake = JSON.parse(await readFile(fakeStatePath, "utf8"));
     assert.ok(fake.calls.some((call) => call.name === "list_pages"));
     assert.ok(fake.calls.some((call) => call.name === "select_page"));
+    assert.equal(fake.calls.every((call) => call.leaseWaitMs === 7_000), true);
     assert.ok(fake.commandEnvelopes.some((value) => value.command.command === "status"));
 
     const deletePlan = await runPowerShell([...common, "-Command", "plan-delete", "-Names", "existing-alpha.txt"], { TEAL_FAKE_MCP_STATE: fakeStatePath });
@@ -113,6 +117,30 @@ test("PowerShell wrapper preserves persistent mapping, parameter sets, version g
     assert.match(mutuallyExclusive.stderr, /parameter set cannot be resolved|parameters cannot be used together/iu);
     assert.equal(mutuallyExclusive.stdout, "");
 
+    for (const invalidWait of ["0", "301"]) {
+      const invalid = await runPowerShell([
+        "-PersistentBridgePath", fakeProxyPath,
+        "-BridgeWaitSeconds", invalidWait,
+        "-Issue", "TAB-TEST",
+        "-Command", "status",
+        "-ExtensionRoot", extensionRoot
+      ], { TEAL_FAKE_MCP_STATE: join(temp, `invalid-wait-${invalidWait}.fake`) });
+      assert.notEqual(invalid.code, 0);
+      assert.match(invalid.stderr, /BridgeWaitSeconds|validation range|less than the minimum|greater than the maximum/iu);
+      assert.equal(invalid.stdout, "");
+    }
+
+    const browserWait = await runPowerShell([
+      "-Browser", "chrome",
+      "-BridgeWaitSeconds", "1",
+      "-Issue", "TAB-TEST",
+      "-Command", "status",
+      "-ExtensionRoot", extensionRoot
+    ]);
+    assert.notEqual(browserWait.code, 0);
+    assert.match(browserWait.stderr, /parameter set cannot be resolved|parameters cannot be used together/iu);
+    assert.equal(browserWait.stdout, "");
+
     const missingPersistentPath = join(temp, "missing-persistent-proxy.mjs");
     const missingPersistent = await runPowerShell([
       "-PersistentBridgePath", missingPersistentPath,
@@ -145,7 +173,7 @@ test("PowerShell wrapper preserves persistent mapping, parameter sets, version g
       "-ExtensionRoot", oldExtensionRoot
     ], { TEAL_FAKE_MCP_STATE: join(temp, "old-version.fake") });
     assert.notEqual(oldVersion.code, 0);
-    assert.match(oldVersion.stderr, /requires Teal Eval Bulk Files 0\.9\.6\. Found 0\.9\.3/iu);
+    assert.match(oldVersion.stderr, /requires Teal Eval Bulk Files 0\.9\.7\. Found 0\.9\.3/iu);
     assert.equal(oldVersion.stdout, "");
 
     const failedApply = await runPowerShell([

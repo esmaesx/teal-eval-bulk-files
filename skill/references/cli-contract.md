@@ -6,7 +6,8 @@
 - CLI: `extension/teal-eval-bulk-cli.mjs`
 - Persistent-bridge client module: `extension/persistent-mcp-client.mjs`
 - Extension README: `README.md`
-- Required extension version: `0.9.6`
+- Required extension version: `0.9.7`
+- Required persistent gateway: `chrome-devtools-persistent-gateway` version `0.1.2`
 - Node.js requirement: version 24
 
 ## Batch pattern
@@ -34,7 +35,7 @@ The CLI attaches only to an already open issue target. It accepts exactly one tr
 
 Treat local persistent-bridge or CDP access as a trusted local mutation authority. The one-use local token and extension authorization ID prevent stale, mismatched, or repeated applies within the CLI workflow. They are not a defense against a hostile local process that already controls the same browser session, because that process can create and apply its own plan.
 
-Persistent-bridge mode uses the optional [Chrome DevTools MCP persistent bridge](https://github.com/esmaesx/chrome-devtools-mcp-persistent-bridge), which is in a separate repository. Keep its checkout separate from the extension repository. This mode requires an explicit absolute path to the compatible `runtime/stdio-proxy.mjs` file and has no repository default. Use it for work with several commands. Explicit loopback endpoints support Microsoft Edge, Google Chrome, Brave, and Chromium. Current-session mode supports Google Chrome and Microsoft Edge. Direct current-session and CDP use can show a local browser permission prompt. The user must enable remote debugging at the browser's `inspect/#remote-debugging` page and approve the local connection. A signed-in tab or extension permission alone is not a CLI transport.
+Persistent-bridge mode uses the optional [Chrome DevTools MCP persistent bridge](https://github.com/esmaesx/chrome-devtools-mcp-persistent-bridge), which is in a separate repository. Keep its checkout separate from the extension repository. This mode requires an explicit absolute path to the compatible `runtime/stdio-proxy.mjs` file and has no repository path default. Use it for work with several commands. The CLI validates the gateway name and exact version before browser dispatch. Explicit loopback endpoints support Microsoft Edge, Google Chrome, Brave, and Chromium. Current-session mode supports Google Chrome and Microsoft Edge. Direct current-session and CDP use can show a local browser permission prompt. The user must enable remote debugging at the browser's `inspect/#remote-debugging` page and approve the local connection. A signed-in tab or extension permission alone is not a CLI transport.
 
 If more than one allowed issue tab matches, the CLI reports only a count and safe matching target IDs and titles. It never selects one by itself. Pass `--target-id <listed-id>` or wrapper `-TargetId <listed-id>` to select one exact allowed target. Tokens remain bound to that target.
 
@@ -53,7 +54,9 @@ When no session is named, always ask after read-only discovery. Do not select th
 
 ## Commands
 
-All commands require `--issue` plus exactly one connection choice: `--persistent-bridge <absolute-stdio-proxy-path>`, `--cdp`, or `--browser chrome|edge`. `--user-data-dir` is optional only with `--browser`. `--target-id` is optional and is a safe bounded target ID. The portable PowerShell wrapper maps these to mandatory `-PersistentBridgePath`, `-CdpEndpoint`, and `-Browser` parameter sets, plus optional `-TargetId`. Its operand aliases are `-Names`, `-Files`, `-Paths`, and `-PlanToken`. It has no persistent-bridge default.
+All commands require `--issue` plus exactly one connection choice: `--persistent-bridge <absolute-stdio-proxy-path>`, `--cdp`, or `--browser chrome|edge`. `--bridge-wait-seconds` is optional only with `--persistent-bridge`. It defaults to 120 and accepts one canonical ASCII base-10 integer from 1 through 300. `--user-data-dir` is optional only with `--browser`. `--target-id` is optional and is a safe bounded target ID. The portable PowerShell wrapper maps these to mandatory `-PersistentBridgePath`, `-CdpEndpoint`, and `-Browser` parameter sets, plus optional persistent-only `-BridgeWaitSeconds` and optional `-TargetId`. Its operand aliases are `-Names`, `-Files`, `-Paths`, and `-PlanToken`. It has no persistent-bridge path default.
+
+Persistent mode starts `node <absolute-stdio-proxy-path> chrome-devtools --lease-wait-ms N`, where `N` is the validated seconds value times 1000. The initial `list_pages` request timeout is `N` plus 45 seconds. No other tool timeout receives the queue budget. After the lease is acquired, `select_page` and the target tool remain in the same session. A queue timeout is the authenticated `lease_busy` or `held_unknown` result with `dispatched: false`. It exits `3`, is not indeterminate, and does not cause automatic confirmation, resend, or apply replay. Ambiguous transport failures keep the existing indeterminate apply rules.
 
 - `status`: Return extension readiness and active operation.
 - `list`: Require a present staged-files panel that is not loading, then return the sorted inventory. A present ready empty panel is valid. A missing or loading panel is an observation failure.
@@ -92,7 +95,7 @@ Duplicate upload names and already staged names are skipped. Missing download or
 
 Download results also return `archiveFilename` and `downloadId`. Report both with the four result arrays. Delete and download plan results return `actionableFiles`. Each record has filename, SHA-256, and size.
 
-Bridge failures have one stable `errorKind`: `daemon_absent`, `lease_busy`, `daemon_timeout`, `proxy_lifecycle`, `rpc_error`, `no_matching_tab`, or `generic_bridge_error`. An unknown JSON-RPC `-32603` is `rpc_error`. The CLI recognizes an absent daemon from the real proxy's exact bounded startup-failure record. Malformed or ambiguous startup output is `proxy_lifecycle`. Only `daemon_absent` permits daemon start advice. For `lease_busy`, preserve an authenticated `owner_pid` in the safe JSON and message. Keep `held_unknown` unknown. Never expose owner command lines, tokens, or page data. A no-tab failure means that the browser transport responded, the required allowed issue tab is not open, and no mutation started. It exits `3`.
+Bridge failures have one stable `errorKind`: `daemon_absent`, `lease_busy`, `daemon_timeout`, `proxy_lifecycle`, `rpc_error`, `no_matching_tab`, or `generic_bridge_error`. An unknown JSON-RPC `-32603` is `rpc_error`. The CLI recognizes an absent daemon from the real proxy's exact bounded startup-failure record. Malformed or ambiguous startup output is `proxy_lifecycle`. Only `daemon_absent` permits daemon start advice. For `lease_busy`, preserve an authenticated `owner_pid` in the safe JSON and message. Keep `held_unknown` unknown. Never expose owner command lines, tokens, or page data. A proved queue timeout has `dispatched: false`, stays a connection error, and sends no browser tool again. A no-tab failure means that the browser transport responded, the required allowed issue tab is not open, and no mutation started. It exits `3`.
 
 Any upload error after file transfer without a proved terminal result is `indeterminate`. It includes `uploadedBeforeFailure` from exact observed filename and SHA-256 matches. A proved stopped upload with non-empty `remaining` is an operation failure and exits `4`; it is indeterminate only when the result says its state is uncertain. In direct CDP mode, any apply error after `Runtime.callFunctionOn` dispatch without a proved terminal result is indeterminate. Do not retry an apply after a timeout, closed transport, `indeterminate: true`, or any other uncertain result. Run `status` and `list`, review `uploadedBeforeFailure` with the operator, report only observed state, and create a new plan only with fresh user authority.
 
@@ -102,7 +105,7 @@ The human extension interface keeps its own closed-shadow confirmation controls.
 
 Before a fresh delete plan, the default skill workflow offers and recommends a separate exact-name `plan-download` and `apply-download` backup. A cancelled or uncertain backup blocks delete unless the user explicitly declines that backup. This does not remove the human Confirm/Cancel controls for human-interface batches.
 
-Never click the page's native **remove** control. If duplicate rows are ambiguous, ask the human operator to use that native control. The current interface already shows SHA-256 prefixes in delete review and per-file progress. Version 0.9.6 has no visual interface change.
+Never click the page's native **remove** control. If duplicate rows are ambiguous, ask the human operator to use that native control. The current interface already shows SHA-256 prefixes in delete review and per-file progress. Version 0.9.7 has no visual interface change.
 
 ## Connection examples
 
@@ -111,6 +114,7 @@ For a user-selected Chrome session with a configured persistent bridge:
 ```powershell
 & "<skill-root>\scripts\invoke-teal-cli.ps1" `
   -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -BridgeWaitSeconds 120 `
   -Issue DEMO-204 `
   -Command status
 ```

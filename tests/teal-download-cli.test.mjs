@@ -55,14 +55,14 @@ async function runProcess(command, args, env = {}) {
   });
 }
 
-async function runCli(statePath, args, issueIdentifier = "TAB-TEST") {
+async function runCli(statePath, args, issueIdentifier = "TAB-TEST", env = {}) {
   return runProcess(process.execPath, [
     cliPath,
     "--persistent-bridge", fakeProxyPath,
     "--issue", issueIdentifier,
     "--state", statePath,
     ...args
-  ], { TEAL_FAKE_MCP_STATE: `${statePath}.fake` });
+  ], { TEAL_FAKE_MCP_STATE: `${statePath}.fake`, ...env });
 }
 
 function parseOnlyJson(stdout) {
@@ -126,6 +126,94 @@ test("parser accepts download commands and rejects malformed download usage", ()
     /absolute/u
   );
   assert.throws(() => new PersistentBridgeClient("relative-proxy.mjs", "TAB-TEST"), /absolute/u);
+});
+
+test("persistent bridge wait parsing is canonical, bounded, unique, and persistent-only", () => {
+  const prefix = ["--persistent-bridge", fakeProxyPath, "--issue", "tab-test"];
+  assert.equal(parseArguments([...prefix, "status"]).bridgeWaitMs, 120_000);
+  assert.equal(parseArguments([...prefix, "--bridge-wait-seconds", "1", "status"]).bridgeWaitMs, 1_000);
+  assert.equal(parseArguments([...prefix, "--bridge-wait-seconds", "300", "status"]).bridgeWaitMs, 300_000);
+  for (const value of ["0", "301", "01", "1.0", "1e2", "0x10", "+1", "-1", " 1", "1 ", "１２"]) {
+    assert.throws(
+      () => parseArguments([...prefix, "--bridge-wait-seconds", value, "status"]),
+      /bridge-wait-seconds.*canonical integer|bridge-wait-seconds.*1 through 300/u,
+      value
+    );
+  }
+  assert.throws(
+    () => parseArguments([...prefix, "status", "--bridge-wait-seconds"]),
+    /Missing value for --bridge-wait-seconds/u
+  );
+  assert.throws(
+    () => parseArguments([...prefix, "--bridge-wait-seconds", "1", "--bridge-wait-seconds", "2", "status"]),
+    /must not be repeated/u
+  );
+  assert.throws(
+    () => parseArguments(["--cdp", "http://127.0.0.1:9222", "--bridge-wait-seconds", "1", "--issue", "TAB-TEST", "status"]),
+    /only with --persistent-bridge/u
+  );
+  assert.throws(
+    () => parseArguments(["--browser", "chrome", "--bridge-wait-seconds", "1", "--issue", "TAB-TEST", "status"]),
+    /only with --persistent-bridge/u
+  );
+  assert.doesNotThrow(() => new PersistentBridgeClient(fakeProxyPath, "TAB-TEST", { leaseWaitMs: 1_000 }));
+  assert.doesNotThrow(() => new PersistentBridgeClient(fakeProxyPath, "TAB-TEST", { leaseWaitMs: 300_000 }));
+  for (const value of [999, 300_001, 1_000.5, "1000"]) {
+    assert.throws(() => new PersistentBridgeClient(fakeProxyPath, "TAB-TEST", { leaseWaitMs: value }), /1000 through 300000/u);
+    assert.throws(() => new McpStdioSession(fakeProxyPath, { leaseWaitMs: value }), /1000 through 300000/u);
+  }
+});
+
+test("persistent tool sessions budget queue wait only for list_pages and keep one session", async () => {
+  const client = new PersistentBridgeClient(fakeProxyPath, "TAB-TEST", { leaseWaitMs: 12_000 });
+  const calls = [];
+  const session = {
+    async callTool(name, args, timeoutMs) {
+      calls.push({ name, args, timeoutMs });
+      if (name === "list_pages") {
+        return { structuredContent: { pages: [{ id: 7, title: "TAB-TEST local fixture", url: "http://127.0.0.1:8769/issue/TAB-TEST" }] } };
+      }
+      return { structuredContent: {} };
+    }
+  };
+  client.withSession = async (callback) => callback(session);
+  await client.performTool("take_snapshot", { verbose: false }, 70_000);
+  assert.deepEqual(calls, [
+    { name: "list_pages", args: {}, timeoutMs: 57_000 },
+    { name: "select_page", args: { pageId: 7, bringToFront: false }, timeoutMs: 45_000 },
+    { name: "take_snapshot", args: { verbose: false }, timeoutMs: 70_000 }
+  ]);
+});
+
+test("proved pre-dispatch lease failures bypass apply confirmation but ambiguous failures do not", async () => {
+  for (const status of ["lease_busy", "held_unknown"]) {
+    const client = new PersistentBridgeClient(fakeProxyPath, "TAB-TEST");
+    client.targetUrl = "http://127.0.0.1:8769/issue/TAB-TEST";
+    client.resolveControlUid = async () => "command-uid";
+    const proved = new McpToolError("The lease wait expired.", { status, data: { dispatched: false } });
+    client.performTool = async () => { throw proved; };
+    let confirmations = 0;
+    client.confirmDispatchAfterIndeterminate = async () => { confirmations += 1; };
+    await assert.rejects(client.callBridge({ command: "apply-delete" }), (error) => error === proved && error.indeterminate !== true);
+    assert.equal(confirmations, 0);
+  }
+
+  const ambiguousClient = new PersistentBridgeClient(fakeProxyPath, "TAB-TEST");
+  ambiguousClient.targetUrl = "http://127.0.0.1:8769/issue/TAB-TEST";
+  ambiguousClient.resolveControlUid = async () => "command-uid";
+  ambiguousClient.performTool = async () => {
+    throw new McpToolError("The lease state is unclear.", { status: "lease_busy", data: {} });
+  };
+  let ambiguousConfirmations = 0;
+  ambiguousClient.confirmDispatchAfterIndeterminate = async () => {
+    ambiguousConfirmations += 1;
+    throw new Error("No acknowledgement was available.");
+  };
+  await assert.rejects(
+    ambiguousClient.callBridge({ command: "apply-delete" }),
+    (error) => error.indeterminate === true && /apply dispatch is indeterminate/u.test(error.message)
+  );
+  assert.equal(ambiguousConfirmations, 1);
 });
 
 class FakeOpenSocket extends EventTarget {
@@ -452,6 +540,40 @@ test("MCP stdio framing remains fragmented and out of order safe", { concurrency
   }
 });
 
+test("persistent proxy spawn arguments are exact and carry the validated wait", { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), "teal-proxy-argv-"));
+  try {
+    const statePath = join(temp, "tokens.json");
+    const run = await runCli(statePath, ["--bridge-wait-seconds", "7", "status"]);
+    assert.equal(run.code, 0, run.stderr);
+    const fake = await readJson(`${statePath}.fake`);
+    assert.ok(fake.calls.length > 0);
+    assert.equal(fake.calls.every((call) => call.leaseWaitMs === 7_000), true);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("persistent initialize rejects an old or changed gateway before browser dispatch", { concurrency: false }, async () => {
+  for (const [env, expected] of [
+    [{ TEAL_FAKE_SERVER_NAME: "changed-gateway" }, /chrome-devtools-persistent-gateway 0\.1\.2/u],
+    [{ TEAL_FAKE_SERVER_VERSION: "0.1.1" }, /chrome-devtools-persistent-gateway 0\.1\.2/u]
+  ]) {
+    const temp = await mkdtemp(join(tmpdir(), "teal-gateway-identity-"));
+    try {
+      const statePath = join(temp, "tokens.json");
+      const run = await runCli(statePath, ["--bridge-wait-seconds", "1", "status"], "TAB-TEST", env);
+      assert.equal(run.code, 3, run.stderr);
+      const result = parseOnlyJson(run.stdout);
+      assert.equal(result.errorKind, "proxy_lifecycle");
+      assert.match(result.error, expected);
+      await assert.rejects(readFile(`${statePath}.fake`, "utf8"), (error) => error?.code === "ENOENT");
+    } finally {
+      await rm(temp, { recursive: true, force: true });
+    }
+  }
+});
+
 test("MCP JSON-RPC and tool errors preserve sanitized structured fields", { concurrency: false }, async () => {
   const temp = await mkdtemp(join(tmpdir(), "teal-download-mcp-errors-"));
   const fakeState = join(temp, "fake.json");
@@ -545,6 +667,41 @@ test("persistent no-tab failure exits 3 and confirms zero mutation dispatch", { 
     const fake = await readJson(`${statePath}.fake`);
     assert.deepEqual(fake.calls.map((call) => call.name), ["list_pages"]);
     assert.deepEqual(fake.commandEnvelopes, []);
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("apply queue timeout exits 3 without indeterminate state, fill dispatch, confirmation, or replay", { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), "teal-apply-queue-timeout-"));
+  try {
+    const statePath = join(temp, "tokens.json");
+    const planRun = await runCli(statePath, ["--bridge-wait-seconds", "1", "plan-download", "existing-alpha.txt"]);
+    assert.equal(planRun.code, 0, planRun.stderr);
+    const plan = parseOnlyJson(planRun.stdout);
+    const fakeBefore = await readJson(`${statePath}.fake`);
+    fakeBefore.queueBusyBeforeApplyFill = true;
+    await writeFakeState(statePath, fakeBefore);
+
+    const applyRun = await runCli(statePath, ["--bridge-wait-seconds", "1", "apply-download", plan.token]);
+    assert.equal(applyRun.code, 3, applyRun.stderr);
+    const failed = parseOnlyJson(applyRun.stdout);
+    assert.equal(failed.errorKind, "lease_busy");
+    assert.equal(failed.bridgeStatus, "lease_busy");
+    assert.equal(failed.dispatched, false);
+    assert.equal(failed.errorData?.dispatched, false);
+    assert.notEqual(failed.indeterminate, true);
+    assert.equal(failed.exitCode, 3);
+
+    const fakeAfter = await readJson(`${statePath}.fake`);
+    assert.equal(fakeAfter.queueBusyEvents, 1);
+    assert.equal(fakeAfter.commandEnvelopes.some((envelope) => envelope.command.command === "apply-download"), false);
+    assert.equal(fakeAfter.calls.filter((call) => call.name === "fill" && commandFromFill(call).command === "apply-download").length, 0);
+    assert.equal(fakeAfter.calls.at(-1)?.name, "list_pages");
+    const timedOutSession = fakeAfter.calls.at(-1).session;
+    assert.deepEqual(fakeAfter.chromeDispatches.filter((call) => call.session === timedOutSession), []);
+    const tokenState = await readJson(statePath);
+    assert.equal(tokenState.tokens[plan.token].consumed, true);
   } finally {
     await rm(temp, { recursive: true, force: true });
   }

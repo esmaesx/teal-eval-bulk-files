@@ -3,6 +3,10 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'PersistentBridge')]
     [string]$PersistentBridgePath,
 
+    [Parameter(ParameterSetName = 'PersistentBridge')]
+    [ValidateRange(1, 300)]
+    [int]$BridgeWaitSeconds = 120,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Cdp')]
     [string]$CdpEndpoint,
 
@@ -62,8 +66,8 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ($manifest.version -ne '0.9.6') {
-    throw "This skill requires Teal Eval Bulk Files 0.9.6. Found $($manifest.version)."
+if ($manifest.version -ne '0.9.7') {
+    throw "This skill requires Teal Eval Bulk Files 0.9.7. Found $($manifest.version)."
 }
 
 $node = Get-Command node -ErrorAction Stop
@@ -86,7 +90,10 @@ if ($PSCmdlet.ParameterSetName -eq 'Browser') {
     if (-not (Test-Path -LiteralPath $resolvedPersistentBridgePath -PathType Leaf)) {
         throw "The persistent Chrome stdio proxy was not found at $resolvedPersistentBridgePath"
     }
-    $arguments += @('--persistent-bridge', $resolvedPersistentBridgePath)
+    $arguments += @(
+        '--persistent-bridge', $resolvedPersistentBridgePath,
+        '--bridge-wait-seconds', [string]$BridgeWaitSeconds
+    )
 } else {
     $arguments += @('--cdp', $CdpEndpoint)
 }

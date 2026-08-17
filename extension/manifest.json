@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Teal Eval Bulk Files",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "description": "Adds safe bulk upload, bulk download, and bulk delete controls to Teal Alpha eval issue pages.",
   "permissions": [
     "downloads",
