@@ -5,9 +5,9 @@ import { basename, isAbsolute, resolve } from "node:path";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const PERSISTENT_BRIDGE_PROTOCOL_VERSION = 1;
-const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.7";
+const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.8";
 const PERSISTENT_GATEWAY_NAME = "chrome-devtools-persistent-gateway";
-const PERSISTENT_GATEWAY_VERSION = "0.1.2";
+const PERSISTENT_GATEWAY_VERSION = "0.1.3";
 const DEFAULT_LEASE_WAIT_MS = 120_000;
 const MIN_LEASE_WAIT_MS = 1_000;
 const MAX_LEASE_WAIT_MS = 300_000;

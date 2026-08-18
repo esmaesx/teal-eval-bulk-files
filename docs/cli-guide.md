@@ -10,17 +10,20 @@ Use one plan for all requested files. The wrapper accepts `-Files`, `-Paths`, an
 
 ```powershell
 $plan = & .\skill\scripts\invoke-teal-cli.ps1 `
-  -Browser edge -Issue DEMO-204 -Command plan-upload `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command plan-upload `
   -Files "C:\work\new-evidence.csv","C:\work\notes.txt" | ConvertFrom-Json
 
 $plan.actionableFiles
 
 & .\skill\scripts\invoke-teal-cli.ps1 `
-  -Browser edge -Issue DEMO-204 -Command apply-upload `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command apply-upload `
   -PlanToken $plan.token
 
 $after = & .\skill\scripts\invoke-teal-cli.ps1 `
-  -Browser edge -Issue DEMO-204 -Command list | ConvertFrom-Json
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command list | ConvertFrom-Json
 ```
 
 Keep `actionableFiles` as the approved manifest. After apply, run `list`. For each manifest item, require exactly one row with the same complete filename and SHA-256 value. A missing, changed, or repeated row is a failure. Use `verify` only when the local paths are the complete intended replacement set for all staged files.
@@ -28,8 +31,8 @@ Keep `actionableFiles` as the approved manifest. After apply, run `list`. For ea
 ## Requirements
 
 - Node.js 24
-- Teal Eval Bulk Files `0.9.7` loaded unpacked in Chrome or Microsoft Edge
-- Chrome DevTools MCP persistent bridge `0.1.2` for persistent mode
+- Teal Eval Bulk Files `0.9.8` loaded unpacked in Chrome or Microsoft Edge
+- Chrome DevTools MCP persistent bridge `0.1.3` for persistent mode
 - An open Teal Alpha issue tab
 - The selected browser's protected local debugging bridge enabled
 
@@ -58,6 +61,8 @@ After the user selects the session, use exactly one wrapper transport:
 The [Chrome DevTools MCP persistent bridge](https://github.com/esmaesx/chrome-devtools-mcp-persistent-bridge) provides the optional persistent Chrome transport. It is in a separate repository. Keep its checkout separate from this repository, and pass the absolute path to its `runtime/stdio-proxy.mjs` file. Teal validates the MCP server name and exact bridge version before a browser tool can run.
 
 The portable wrapper has no default persistent path. The presence of a proxy does not select a browser session. Use persistent mode for work with several commands. Direct mode can cause a local browser permission prompt.
+
+Agent safety rule: For Teal file work, agents must use the PowerShell wrapper with `-PersistentBridgePath`. They must not start a separate `chrome-devtools-mcp` process or a Claude `--chrome` session. Those clients bypass the shared lease and can cause repeated Chrome approval prompts. Direct wrapper modes are for an explicit operator fallback only.
 
 If more than one allowed tab matches the issue, the CLI stops and reports only safe target IDs and titles. It never selects one by itself. Use `--target-id <listed-id>` or wrapper `-TargetId <listed-id>` to select one exact allowed tab.
 
@@ -222,7 +227,7 @@ The `runtime` folder contains the selected `stdio-proxy.mjs` file. Use this reco
 2. Read `errorKind`. The stable values are `daemon_absent`, `lease_busy`, `daemon_timeout`, `proxy_lifecycle`, `rpc_error`, `no_matching_tab`, and `generic_bridge_error`.
 3. Do not use `backend_connected: true` as proof that the browser lease is free.
 4. Run `runtime\start-daemon.ps1` only when status confirms `daemon_absent` and local authority permits the start.
-5. For `lease_busy`, use an authenticated `owner_pid` when the result has one. Do not report that known owner as unknown. A queue timeout has `dispatched: false`, exits `3`, and does not permit automatic confirmation, resend, or apply replay. For `held_unknown`, or when no authenticated PID exists, report that the owner is unknown. Do not print owner command lines, tokens, or page data. Check the exact owner and liveness. Do not kill or restart a process by count or age.
+5. For `lease_busy`, use an authenticated `owner_pid` when the result has one. Do not report that known owner as unknown. A queue timeout has `dispatched: false`, exits `3`, and does not permit automatic confirmation, resend, or apply replay. If an apply already claimed its one-use token, the error also has `tokenConsumed: true`; the token stays consumed. For `held_unknown`, or when no authenticated PID exists, report that the owner is unknown. Do not print owner command lines, tokens, or page data. Check the exact owner and liveness. Do not kill or restart a process by count or age.
 6. For an uncertain apply, run read-only `status` and `list`. Do not retry, kill, or restart as a response to that apply.
 7. Run a new command only after the operator confirms the transport state.
 
@@ -230,4 +235,4 @@ The CLI recognizes `daemon_absent` only from the real proxy's bounded, exact sta
 
 Never print browser WebSocket paths, extension authorization IDs, cookies, or unrelated tab URLs.
 
-The current human interface already shows SHA-256 prefixes in delete review and per-file progress during batch work. Version 0.9.7 has no visual interface change.
+The current human interface already shows SHA-256 prefixes in delete review and per-file progress during batch work. Version 0.9.8 has no visual interface change.

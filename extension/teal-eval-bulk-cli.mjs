@@ -406,7 +406,7 @@ function daemonRecoveryError(error, persistentBridgePath) {
     message = `${text} Run ${statusCommand}. Check the exact owner and process state. Do not kill or restart a process automatically. No request was retried.`;
   }
   const mapped = new Error(message);
-  for (const key of ["rpcCode", "rpcMessage", "rpcData", "data", "status", "method", "transportResponded", "mutationStarted", "dispatched"]) {
+  for (const key of ["rpcCode", "rpcMessage", "rpcData", "data", "status", "method", "transportResponded", "mutationStarted", "dispatched", "tokenConsumed"]) {
     if (original[key] !== undefined) mapped[key] = original[key];
   }
   mapped.errorKind = errorKind;
@@ -432,6 +432,7 @@ function bridgeErrorOutput(error) {
   if (error?.transportResponded === true) output.transportResponded = true;
   if (error?.mutationStarted === false) output.mutationStarted = false;
   if (error?.dispatched === false || error?.data?.dispatched === false) output.dispatched = false;
+  if (error?.tokenConsumed === true) output.tokenConsumed = true;
   if (error?.indeterminate === true) output.indeterminate = true;
   return output;
 }
@@ -1227,7 +1228,14 @@ async function applyPlan(cli, client, contextId) {
     throw error;
   }
 
-  if (operation === "upload") return applyUploadPlan(cli, client, contextId, token, record, inventory, uploadSnapshot);
+  if (operation === "upload") {
+    try {
+      return await applyUploadPlan(cli, client, contextId, token, record, inventory, uploadSnapshot);
+    } catch (error) {
+      if (error && (typeof error === "object" || typeof error === "function")) error.tokenConsumed = true;
+      throw error;
+    }
+  }
   const applyTimeoutMs = cli.command === "apply-upload"
     ? APPLY_UPLOAD_TIMEOUT_MS
     : cli.command === "apply-download" ? APPLY_DOWNLOAD_TIMEOUT_MS : APPLY_DELETE_TIMEOUT_MS;
@@ -1242,6 +1250,7 @@ async function applyPlan(cli, client, contextId) {
         error: `The direct apply dispatch is indeterminate and may still be running. ${error instanceof Error ? error.message : String(error)}`
       });
     }
+    if (error && (typeof error === "object" || typeof error === "function")) error.tokenConsumed = true;
     throw error;
   }
   const completeResult = result && typeof result === "object"

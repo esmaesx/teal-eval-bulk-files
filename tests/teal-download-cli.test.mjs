@@ -554,10 +554,62 @@ test("persistent proxy spawn arguments are exact and carry the validated wait", 
   }
 });
 
-test("persistent initialize rejects an old or changed gateway before browser dispatch", { concurrency: false }, async () => {
+test("CLI forwards the 120000 ms default for plan-upload, apply-upload, and list", { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), "teal-default-proxy-wait-"));
+  try {
+    const statePath = join(temp, "tokens.json");
+    const uploadPath = join(temp, "default-wait-upload.txt");
+    await writeFile(uploadPath, "default wait", "utf8");
+
+    let callCount = 0;
+    const assertNewCallsUseDefaultWait = async (command) => {
+      const fake = await readJson(`${statePath}.fake`);
+      const calls = fake.calls.slice(callCount);
+      assert.ok(calls.length > 0, `${command} did not open a persistent proxy session.`);
+      assert.equal(calls.every((call) => call.leaseWaitMs === 120_000), true, `${command} did not forward 120000 ms.`);
+      callCount = fake.calls.length;
+      return fake;
+    };
+
+    const planRun = await runCli(statePath, ["plan-upload", uploadPath]);
+    assert.equal(planRun.code, 0, planRun.stderr);
+    const plan = parseOnlyJson(planRun.stdout);
+    assert.deepEqual(plan.actionableNames, [basename(uploadPath)]);
+    await assertNewCallsUseDefaultWait("plan-upload");
+
+    const applyRun = await runCli(statePath, ["apply-upload", plan.token]);
+    assert.equal(applyRun.code, 0, applyRun.stderr);
+    assert.deepEqual(parseOnlyJson(applyRun.stdout).succeeded, [basename(uploadPath)]);
+    await assertNewCallsUseDefaultWait("apply-upload");
+
+    const listRun = await runCli(statePath, ["list"]);
+    assert.equal(listRun.code, 0, listRun.stderr);
+    assert.equal(parseOnlyJson(listRun.stdout).command, "list");
+    await assertNewCallsUseDefaultWait("list");
+  } finally {
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("persistent initialize accepts gateway 0.1.3 only before browser dispatch", { concurrency: false }, async () => {
+  const acceptedTemp = await mkdtemp(join(tmpdir(), "teal-gateway-accepted-"));
+  try {
+    const statePath = join(acceptedTemp, "tokens.json");
+    const accepted = await runCli(statePath, ["--bridge-wait-seconds", "1", "status"], "TAB-TEST", {
+      TEAL_FAKE_SERVER_VERSION: "0.1.3"
+    });
+    assert.equal(accepted.code, 0, accepted.stderr);
+    assert.equal(parseOnlyJson(accepted.stdout).ok, true);
+    const fake = await readJson(`${statePath}.fake`);
+    assert.ok(fake.calls.some((call) => call.name === "list_pages"));
+  } finally {
+    await rm(acceptedTemp, { recursive: true, force: true });
+  }
+
   for (const [env, expected] of [
-    [{ TEAL_FAKE_SERVER_NAME: "changed-gateway" }, /chrome-devtools-persistent-gateway 0\.1\.2/u],
-    [{ TEAL_FAKE_SERVER_VERSION: "0.1.1" }, /chrome-devtools-persistent-gateway 0\.1\.2/u]
+    [{ TEAL_FAKE_SERVER_NAME: "changed-gateway" }, /chrome-devtools-persistent-gateway 0\.1\.3/u],
+    [{ TEAL_FAKE_SERVER_VERSION: "0.1.2" }, /chrome-devtools-persistent-gateway 0\.1\.3/u],
+    [{ TEAL_FAKE_SERVER_VERSION: "0.1.4" }, /chrome-devtools-persistent-gateway 0\.1\.3/u]
   ]) {
     const temp = await mkdtemp(join(tmpdir(), "teal-gateway-identity-"));
     try {
@@ -690,7 +742,9 @@ test("apply queue timeout exits 3 without indeterminate state, fill dispatch, co
     assert.equal(failed.bridgeStatus, "lease_busy");
     assert.equal(failed.dispatched, false);
     assert.equal(failed.errorData?.dispatched, false);
-    assert.notEqual(failed.indeterminate, true);
+    assert.equal(failed.tokenConsumed, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(failed, "indeterminate"), false);
+    assert.notEqual(failed.replayAllowed, true);
     assert.equal(failed.exitCode, 3);
 
     const fakeAfter = await readJson(`${statePath}.fake`);
@@ -699,6 +753,9 @@ test("apply queue timeout exits 3 without indeterminate state, fill dispatch, co
     assert.equal(fakeAfter.calls.filter((call) => call.name === "fill" && commandFromFill(call).command === "apply-download").length, 0);
     assert.equal(fakeAfter.calls.at(-1)?.name, "list_pages");
     const timedOutSession = fakeAfter.calls.at(-1).session;
+    const timedOutSessionCalls = fakeAfter.calls.filter((call) => call.session === timedOutSession);
+    assert.deepEqual(timedOutSessionCalls.map((call) => call.name), ["list_pages"]);
+    assert.equal(fakeAfter.calls.slice(fakeBefore.calls.length).at(-1)?.session, timedOutSession);
     assert.deepEqual(fakeAfter.chromeDispatches.filter((call) => call.session === timedOutSession), []);
     const tokenState = await readJson(statePath);
     assert.equal(tokenState.tokens[plan.token].consumed, true);

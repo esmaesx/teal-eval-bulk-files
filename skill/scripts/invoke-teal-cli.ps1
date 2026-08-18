@@ -66,8 +66,8 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-if ($manifest.version -ne '0.9.7') {
-    throw "This skill requires Teal Eval Bulk Files 0.9.7. Found $($manifest.version)."
+if ($manifest.version -ne '0.9.8') {
+    throw "This skill requires Teal Eval Bulk Files 0.9.8. Found $($manifest.version)."
 }
 
 $node = Get-Command node -ErrorAction Stop

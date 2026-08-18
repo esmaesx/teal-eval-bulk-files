@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.8 - 2026-08-17
+
+- Require `chrome-devtools-persistent-gateway` 0.1.3 and keep exact MCP identity checks before browser dispatch.
+- Keep the default cooperative lease wait at 120 seconds while bridge 0.1.3 releases authenticated idle owners without an idle-owner delay.
+- Verify that `plan-upload`, `apply-upload`, and `list` send the 120000 ms default to every persistent proxy session.
+- Keep proved pre-dispatch lease failures at exit code `3`, with no fill, confirmation, replay, or indeterminate result.
+- Report `tokenConsumed: true` when a proved lease failure occurs after an apply claims its one-use token. The token stays consumed and the CLI does not replay the apply.
+- Tell agents to use the persistent PowerShell wrapper and not start direct `chrome-devtools-mcp` or Claude `--chrome` sessions for Teal file work.
+- Keep the existing visual interface unchanged.
+
 ## 0.9.7 - 2026-08-17
 
 - Add bounded cooperative lease waiting so several CLI agents can share one persistent Chrome bridge.

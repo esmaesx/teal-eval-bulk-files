@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 const extensionRoot = resolve(import.meta.dirname, "..", "extension");
 const productionPath = resolve(extensionRoot, "manifest.json");
 const outputPath = process.argv[2];
-const releaseVersion = "0.9.7";
+const releaseVersion = "0.9.8";
 
 if (!outputPath) {
   process.stderr.write("Usage: node generate-teal-test-manifest.mjs <output-manifest-path>\n");

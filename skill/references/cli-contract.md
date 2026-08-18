@@ -6,8 +6,8 @@
 - CLI: `extension/teal-eval-bulk-cli.mjs`
 - Persistent-bridge client module: `extension/persistent-mcp-client.mjs`
 - Extension README: `README.md`
-- Required extension version: `0.9.7`
-- Required persistent gateway: `chrome-devtools-persistent-gateway` version `0.1.2`
+- Required extension version: `0.9.8`
+- Required persistent gateway: `chrome-devtools-persistent-gateway` version `0.1.3`
 - Node.js requirement: version 24
 
 ## Batch pattern
@@ -16,15 +16,18 @@ Use one plan for the complete requested batch. The wrapper aliases are `-Files`,
 
 ```powershell
 $plan = & "<skill-root>\scripts\invoke-teal-cli.ps1" `
-  -Browser edge -Issue DEMO-204 -Command plan-upload `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command plan-upload `
   -Paths "C:\work\evidence.csv","C:\work\notes.txt" | ConvertFrom-Json
 
 & "<skill-root>\scripts\invoke-teal-cli.ps1" `
-  -Browser edge -Issue DEMO-204 -Command apply-upload `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command apply-upload `
   -PlanToken $plan.token
 
 $after = & "<skill-root>\scripts\invoke-teal-cli.ps1" `
-  -Browser edge -Issue DEMO-204 -Command list | ConvertFrom-Json
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command list | ConvertFrom-Json
 ```
 
 Keep the plan's `actionableFiles` as the approved manifest. After apply, require exactly one row in `list` for each complete manifest filename and SHA-256 value. Use `verify` only when the local paths are the complete intended replacement set for all staged files.
@@ -36,6 +39,8 @@ The CLI attaches only to an already open issue target. It accepts exactly one tr
 Treat local persistent-bridge or CDP access as a trusted local mutation authority. The one-use local token and extension authorization ID prevent stale, mismatched, or repeated applies within the CLI workflow. They are not a defense against a hostile local process that already controls the same browser session, because that process can create and apply its own plan.
 
 Persistent-bridge mode uses the optional [Chrome DevTools MCP persistent bridge](https://github.com/esmaesx/chrome-devtools-mcp-persistent-bridge), which is in a separate repository. Keep its checkout separate from the extension repository. This mode requires an explicit absolute path to the compatible `runtime/stdio-proxy.mjs` file and has no repository path default. Use it for work with several commands. The CLI validates the gateway name and exact version before browser dispatch. Explicit loopback endpoints support Microsoft Edge, Google Chrome, Brave, and Chromium. Current-session mode supports Google Chrome and Microsoft Edge. Direct current-session and CDP use can show a local browser permission prompt. The user must enable remote debugging at the browser's `inspect/#remote-debugging` page and approve the local connection. A signed-in tab or extension permission alone is not a CLI transport.
+
+For agent-driven Teal file work, use the PowerShell wrapper with `-PersistentBridgePath`. Do not start a separate `chrome-devtools-mcp` process or a Claude `--chrome` session. Those clients bypass the shared lease and can cause repeated Chrome approval prompts. Direct wrapper modes are for an explicit operator fallback only.
 
 If more than one allowed issue tab matches, the CLI reports only a count and safe matching target IDs and titles. It never selects one by itself. Pass `--target-id <listed-id>` or wrapper `-TargetId <listed-id>` to select one exact allowed target. Tokens remain bound to that target.
 
@@ -56,7 +61,7 @@ When no session is named, always ask after read-only discovery. Do not select th
 
 All commands require `--issue` plus exactly one connection choice: `--persistent-bridge <absolute-stdio-proxy-path>`, `--cdp`, or `--browser chrome|edge`. `--bridge-wait-seconds` is optional only with `--persistent-bridge`. It defaults to 120 and accepts one canonical ASCII base-10 integer from 1 through 300. `--user-data-dir` is optional only with `--browser`. `--target-id` is optional and is a safe bounded target ID. The portable PowerShell wrapper maps these to mandatory `-PersistentBridgePath`, `-CdpEndpoint`, and `-Browser` parameter sets, plus optional persistent-only `-BridgeWaitSeconds` and optional `-TargetId`. Its operand aliases are `-Names`, `-Files`, `-Paths`, and `-PlanToken`. It has no persistent-bridge path default.
 
-Persistent mode starts `node <absolute-stdio-proxy-path> chrome-devtools --lease-wait-ms N`, where `N` is the validated seconds value times 1000. The initial `list_pages` request timeout is `N` plus 45 seconds. No other tool timeout receives the queue budget. After the lease is acquired, `select_page` and the target tool remain in the same session. A queue timeout is the authenticated `lease_busy` or `held_unknown` result with `dispatched: false`. It exits `3`, is not indeterminate, and does not cause automatic confirmation, resend, or apply replay. Ambiguous transport failures keep the existing indeterminate apply rules.
+Persistent mode starts `node <absolute-stdio-proxy-path> chrome-devtools --lease-wait-ms N`, where `N` is the validated seconds value times 1000. The initial `list_pages` request timeout is `N` plus 45 seconds. No other tool timeout receives the queue budget. After the lease is acquired, `select_page` and the target tool remain in the same session. A queue timeout is the authenticated `lease_busy` or `held_unknown` result with `dispatched: false`. It exits `3`, is not indeterminate, and does not cause automatic confirmation, resend, or apply replay. If an apply already claimed its one-use token, the error also has `tokenConsumed: true`; the token stays consumed. Ambiguous transport failures keep the existing indeterminate apply rules.
 
 - `status`: Return extension readiness and active operation.
 - `list`: Require a present staged-files panel that is not loading, then return the sorted inventory. A present ready empty panel is valid. A missing or loading panel is an observation failure.
@@ -105,7 +110,7 @@ The human extension interface keeps its own closed-shadow confirmation controls.
 
 Before a fresh delete plan, the default skill workflow offers and recommends a separate exact-name `plan-download` and `apply-download` backup. A cancelled or uncertain backup blocks delete unless the user explicitly declines that backup. This does not remove the human Confirm/Cancel controls for human-interface batches.
 
-Never click the page's native **remove** control. If duplicate rows are ambiguous, ask the human operator to use that native control. The current interface already shows SHA-256 prefixes in delete review and per-file progress. Version 0.9.7 has no visual interface change.
+Never click the page's native **remove** control. If duplicate rows are ambiguous, ask the human operator to use that native control. The current interface already shows SHA-256 prefixes in delete review and per-file progress. Version 0.9.8 has no visual interface change.
 
 ## Connection examples
 

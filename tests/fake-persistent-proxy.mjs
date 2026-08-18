@@ -390,7 +390,7 @@ process.stdin.on("data", (chunk) => {
         capabilities: { tools: {} },
         serverInfo: {
           name: process.env.TEAL_FAKE_SERVER_NAME || "chrome-devtools-persistent-gateway",
-          version: process.env.TEAL_FAKE_SERVER_VERSION || "0.1.2"
+          version: process.env.TEAL_FAKE_SERVER_VERSION || "0.1.3"
         }
       });
     } else if (request.method === "tools/list") {

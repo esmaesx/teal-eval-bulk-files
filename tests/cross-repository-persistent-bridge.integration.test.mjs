@@ -107,6 +107,10 @@ function readMode() {
   return readFileSync(path, 'utf8').trim();
 }
 
+function delay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
 function consumeFailure() {
   const path = process.env.TEAL_TEST_FAILURE_MARKER;
   if (!path || existsSync(path)) return false;
@@ -120,7 +124,7 @@ function resultFor(envelope) {
     ok: true,
     issueIdentifier: 'TAB-TEST',
     persistentBridgeProtocolVersion: 1,
-    extensionVersion: '0.9.7',
+    extensionVersion: '0.9.8',
     documentId,
     targetUrl: pageUrl,
   };
@@ -135,7 +139,7 @@ function resultFor(envelope) {
 function terminalMarker(envelope) {
   const payload = {
     protocolVersion: 1,
-    extensionVersion: '0.9.7',
+    extensionVersion: '0.9.8',
     documentId,
     requestId: envelope.requestId,
     targetUrl: pageUrl,
@@ -149,7 +153,13 @@ function terminalMarker(envelope) {
 async function callTool(name, args) {
   if (name === 'list_pages') return ok({ pages: [{ id: 1, title: 'Local Teal test page', url: pageUrl, selected: true }] });
   if (name === 'select_page') return ok({ ok: true, selectedPageId: args.pageId });
-  if (name === 'take_snapshot') return ok({ snapshot: { id: 'teal-command-uid', name: 'Teal CLI persistent command' } });
+  if (name === 'take_snapshot') {
+    if (process.env.TEAL_TEST_DELAY_TOOL === name && /^\d{1,6}$/.test(process.env.TEAL_TEST_DELAY_MS ?? '')) {
+      appendEvent(name, args, { command: 'test-delay' });
+      await delay(Number(process.env.TEAL_TEST_DELAY_MS));
+    }
+    return ok({ snapshot: { id: 'teal-command-uid', name: 'Teal CLI persistent command' } });
+  }
   if (name === 'fill') {
     let envelope;
     try { envelope = JSON.parse(args.value); } catch { return failure('invalid_test_envelope', 'The local test envelope was invalid.'); }
@@ -378,10 +388,11 @@ async function createObservedLeaseOwner(fixture) {
     pid: process.pid,
     parent_pid: process.ppid,
     gateway_instance_id: randomBytes(16).toString('hex'),
+    lease_instance_id: randomBytes(16).toString('hex'),
     acquired_at_utc: new Date().toISOString(),
     last_activity_at_utc: new Date().toISOString(),
-    in_flight: false,
-    queue_depth: 0,
+    in_flight: true,
+    queue_depth: 1,
   };
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -408,13 +419,34 @@ async function createObservedLeaseOwner(fixture) {
       }
       let request;
       try { request = JSON.parse(line); } catch { socket.destroy(); return; }
-      const exactRequest = request
+      const requestKeys = request && typeof request === 'object' && !Array.isArray(request)
+        ? Object.keys(request).sort().join(',')
+        : '';
+      const exactStatusRequest = request
         && typeof request === 'object'
         && !Array.isArray(request)
-        && Object.keys(request).sort().join(',') === 'operation,token'
+        && requestKeys === 'operation,token'
         && request.operation === 'status'
         && request.token === fixture.token;
-      if (!exactRequest) {
+      const exactYieldRequest = request
+        && typeof request === 'object'
+        && !Array.isArray(request)
+        && requestKeys === 'gateway_instance_id,lease_instance_id,operation,token'
+        && request.operation === 'yield'
+        && request.token === fixture.token
+        && request.gateway_instance_id === status.gateway_instance_id
+        && request.lease_instance_id === status.lease_instance_id;
+      if (exactYieldRequest) {
+        socket.end(`${JSON.stringify({
+          operation: 'yield',
+          accepted: false,
+          gateway_instance_id: status.gateway_instance_id,
+          lease_instance_id: status.lease_instance_id,
+          reason: 'owner_busy',
+        })}\n`);
+        return;
+      }
+      if (!exactStatusRequest) {
         socket.destroy();
         return;
       }
@@ -671,7 +703,7 @@ class RawMcpSession {
     });
     assert.equal(typeof initialized.protocolVersion, 'string', 'The real proxy did not initialize.');
     assert.equal(initialized.serverInfo?.name, 'chrome-devtools-persistent-gateway');
-    assert.equal(initialized.serverInfo?.version, '0.1.2');
+    assert.equal(initialized.serverInfo?.version, '0.1.3');
     this.notify('notifications/initialized', {});
     return this;
   }
@@ -736,8 +768,8 @@ test('real bridge and public CLI keep isolated transport failures explicit', asy
     t.skip('The bridge source is unavailable. Set TEAL_PERSISTENT_BRIDGE_SOURCE_ROOT to an absolute local bridge source directory to run this cross-repository suite.');
     return;
   }
-  if (bridgeSource.version !== '0.1.2') {
-    t.skip(`The available bridge is ${bridgeSource.version || 'unversioned'}; this release requires bridge 0.1.2.`);
+  if (bridgeSource.version !== '0.1.3') {
+    t.skip(`The available bridge is ${bridgeSource.version || 'unversioned'}; this release requires bridge 0.1.3.`);
     return;
   }
   const watchedFiles = [
@@ -805,6 +837,9 @@ test('real bridge and public CLI keep isolated transport failures explicit', asy
       assert.equal(contention.request.token === fixture.token, true, 'The queued CLI did not authenticate its lease status request.');
       assert.equal(contention.status.pid, process.pid);
       assert.equal(contention.status.parent_pid, process.ppid);
+      assert.equal(typeof contention.status.lease_instance_id, 'string');
+      assert.equal(contention.status.in_flight, true);
+      assert.equal(contention.status.queue_depth, 1);
       assert.deepEqual(await readEvents(fixture.eventsPath), [], 'The queued CLI dispatched Chrome work before the held lease was released.');
       await owner.close();
       owner = null;
@@ -818,17 +853,35 @@ test('real bridge and public CLI keep isolated transport failures explicit', asy
   });
 
   await t.test('known authenticated lease owner facts reach sanitized CLI JSON without contradiction', async () => {
-    const fixture = await createFixture('lease-owner');
+    const fixture = await createFixture('lease-owner', {
+      env: {
+        TEAL_TEST_DELAY_TOOL: 'take_snapshot',
+        TEAL_TEST_DELAY_MS: '5000',
+      },
+    });
     let owner;
+    let activeOwnerCall;
     try {
       owner = await McpStdioSession.open(join(fixture.root, proxyRelativePath));
       const listed = await owner.callTool('list_pages', {});
       assert.equal(listed.structuredContent?.pages?.length, 1);
+      const selected = await owner.callTool('select_page', { pageId: 1, bringToFront: false });
+      assert.equal(selected.structuredContent?.selectedPageId, 1);
+      activeOwnerCall = owner.callTool('take_snapshot', {});
+      await waitForCondition(async () => {
+        const lease = (await daemonStatus(fixture)).value.lease;
+        const events = await readEvents(fixture.eventsPath);
+        return lease?.state === 'held'
+          && lease.in_flight === true
+          && events.some((event) => event.name === 'take_snapshot');
+      }, 2_000, 'The known lease owner did not enter its delayed backend call.');
       const ownerPid = owner.child.pid;
       const held = (await daemonStatus(fixture)).value.lease;
       assert.equal(held?.state, 'held');
       assert.equal(held.pid, ownerPid);
       assert.equal(held.parent_pid, process.pid);
+      assert.equal(held.in_flight, true);
+      assert.equal(held.queue_depth, 0);
 
       const run = await runCli(fixture, 'status');
       assert.equal(run.exitCode, 3, `Busy CLI returned ${run.exitCode}. ${run.stderr}`);
@@ -845,7 +898,11 @@ test('real bridge and public CLI keep isolated transport failures explicit', asy
       const serialized = JSON.stringify(run.json);
       assert.equal(serialized.includes(fixture.token), false, 'The CLI JSON exposed the daemon token.');
       assert.equal(serialized.includes('dev-newb-chrome-control-'), false, 'The CLI JSON exposed the lease pipe name.');
+      const completedOwnerCall = await activeOwnerCall;
+      activeOwnerCall = null;
+      assert.notEqual(completedOwnerCall.isError, true, 'The delayed owner tool did not complete after the contention check.');
     } finally {
+      await activeOwnerCall?.catch(() => undefined);
       await owner?.close();
       await closeFixture(fixture);
     }

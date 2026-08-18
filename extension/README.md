@@ -65,11 +65,11 @@ If the page shows two rows with the same filename and SHA-256 value, the extensi
 
 For deletions, the final confirmation shows the exact filename and the first eight characters of its SHA-256 value. After confirmation, a five-second countdown starts before the first deletion. Choose **Stop deletion** during the countdown to delete nothing and keep the full selection. Choose it after deletion starts to finish only the current file and keep all later files selected. The extension also stops if the page changes before it can delete the exact next row.
 
-The current interface already shows SHA-256 prefixes in delete review and per-file progress during upload, download, and delete work. Version 0.9.7 has no visual interface change.
+The current interface already shows SHA-256 prefixes in delete review and per-file progress during upload, download, and delete work. Version 0.9.8 has no visual interface change.
 
 ## Local CLI (optional)
 
-`teal-eval-bulk-cli.mjs` is a dependency-free Node 24 tool for an already open browser. Version 0.9.7 supports planned upload, download, deletion, and read-only verification through an optional persistent MCP transport. It requires Chrome DevTools MCP persistent bridge 0.1.2. Keep the bridge checkout separate from this repository. The transport uses the reviewed stdio proxy and the existing long-running Chrome backend. It does not read the daemon token or connect to the daemon pipe. It does not launch a browser, open a tab, navigate a page, read cookies, or read credential stores.
+`teal-eval-bulk-cli.mjs` is a dependency-free Node 24 tool for an already open browser. Version 0.9.8 supports planned upload, download, deletion, and read-only verification through an optional persistent MCP transport. It requires Chrome DevTools MCP persistent bridge 0.1.3. Keep the bridge checkout separate from this repository. The transport uses the reviewed stdio proxy and the existing long-running Chrome backend. It does not read the daemon token or connect to the daemon pipe. It does not launch a browser, open a tab, navigate a page, read cookies, or read credential stores.
 
 ```text
 node teal-eval-bulk-cli.mjs --persistent-bridge <path-to-stdio-proxy.mjs> --issue DEMO-204 status
@@ -93,6 +93,8 @@ The public PowerShell wrapper requires the persistent proxy path for each persis
 
 Persistent mode opens a short stdio proxy session for each browser action. Each session lists the pages, selects the exact issue tab, performs one action, and closes. The shared daemon and Chrome backend stay open. `-BridgeWaitSeconds` or `--bridge-wait-seconds` accepts a canonical integer from 1 through 300 and defaults to 120 seconds. It is persistent-only. The client gives only the first `list_pages` call the queue wait plus its normal 45-second timeout. `select_page` and the target tool stay in that session under one lease. A failed persistent call never falls back to direct CDP. Direct current-browser and explicit CDP mode can show a local browser permission prompt.
 
+For agent-driven Teal file work, use the PowerShell wrapper with `-PersistentBridgePath`. Do not start a separate `chrome-devtools-mcp` process or a Claude `--chrome` session. Those clients bypass the shared lease and can cause repeated Chrome approval prompts. Direct modes remain available only for an explicit operator fallback.
+
 If more than one allowed issue tab matches, the CLI reports only safe target IDs and titles. It never selects one by itself. Pass `--target-id <listed-id>` to select one exact allowed tab. The PowerShell wrapper uses `-TargetId <listed-id>`.
 
 `list`, all plans, and `verify` require a present staged-files panel that is not loading. A present ready panel with no rows is a valid empty inventory. A missing or loading panel is an observation failure. Each plan selects rows and records inventory from one strict refreshed observation.
@@ -107,7 +109,7 @@ An error after that transfer without a proved terminal result is `indeterminate`
 
 Every CLI JSON object has `exitCode` and `exitMeaning`. Delete and download plans include `actionableFiles` records with filename, SHA-256, and size. The human interface keeps its Confirm/Cancel controls. The CLI path does not click them.
 
-For a persistent transport failure, use the `runtime` folder that contains `stdio-proxy.mjs` and run `status.ps1` first. `backend_connected: true` does not prove that the browser lease is free. Run `start-daemon.ps1` only when status confirms `daemon_absent` and local authority permits the start. The CLI accepts the real proxy's exact bounded startup record for this status. Ambiguous child output is `proxy_lifecycle`. A queue timeout before Chrome dispatch is `lease_busy` with `dispatched: false`, exits `3`, and does not cause confirmation or a resend. For `lease_busy`, preserve an authenticated owner PID. Keep `held_unknown` unknown. Never expose command lines, tokens, or page data. Check the exact owner and liveness. Do not kill or restart a process by count or age. Do not retry an uncertain apply.
+For a persistent transport failure, use the `runtime` folder that contains `stdio-proxy.mjs` and run `status.ps1` first. `backend_connected: true` does not prove that the browser lease is free. Run `start-daemon.ps1` only when status confirms `daemon_absent` and local authority permits the start. The CLI accepts the real proxy's exact bounded startup record for this status. Ambiguous child output is `proxy_lifecycle`. A queue timeout before Chrome dispatch is `lease_busy` with `dispatched: false`, exits `3`, and does not cause confirmation or a resend. If an apply already claimed its one-use token, this error also reports `tokenConsumed: true`; the token stays consumed. For `lease_busy`, preserve an authenticated owner PID. Keep `held_unknown` unknown. Never expose command lines, tokens, or page data. Check the exact owner and liveness. Do not kill or restart a process by count or age. Do not retry an uncertain apply.
 
 Direct current-browser and explicit CDP modes remain available for compatibility. They are not the default and can create another Chrome permission request. For direct current-browser mode, use:
 
