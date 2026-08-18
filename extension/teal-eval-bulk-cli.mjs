@@ -6,7 +6,7 @@ import { constants as fsConstants, createReadStream } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, open, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { PersistentBridgeClient } from "./persistent-mcp-client.mjs";
+import { PersistentBridgeClient, isProvedPreDispatchLeaseBusy } from "./persistent-mcp-client.mjs";
 import uploadLifetime from "./upload-lifetime.js";
 import {
   createPrivateSnapshotContainer,
@@ -33,6 +33,7 @@ const EXIT_USAGE = 2;
 const EXIT_CONNECTION = 3;
 const EXIT_OPERATION = 4;
 const TARGET_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const CANONICAL_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/;
 const EXIT_MEANINGS = Object.freeze({
   [0]: "completed",
   [EXIT_USAGE]: "usage error",
@@ -60,10 +61,14 @@ function parseArguments(argv) {
   const positional = [];
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
-    if (value === "--cdp" || value === "--browser" || value === "--persistent-bridge" || value === "--user-data-dir" || value === "--issue" || value === "--state" || value === "--ttl-seconds" || value === "--target-id") {
+    if (value === "--cdp" || value === "--browser" || value === "--persistent-bridge" || value === "--bridge-wait-seconds" || value === "--user-data-dir" || value === "--issue" || value === "--state" || value === "--ttl-seconds" || value === "--target-id") {
       const next = argv[index + 1];
       if (!next || next.startsWith("--")) throw new Error(`Missing value for ${value}.`);
-      options[value.slice(2)] = next;
+      const optionName = value.slice(2);
+      if (optionName === "bridge-wait-seconds" && Object.prototype.hasOwnProperty.call(options, optionName)) {
+        throw new Error("--bridge-wait-seconds must not be repeated.");
+      }
+      options[optionName] = next;
       index += 1;
     } else if (value.startsWith("--")) {
       throw new Error(`Unsupported option ${value}.`);
@@ -82,6 +87,9 @@ function parseArguments(argv) {
   const connectionCount = [options.cdp, options.browser, options["persistent-bridge"]].filter(Boolean).length;
   if (connectionCount !== 1) throw new Error("Use exactly one connection option: --persistent-bridge, --cdp, or --browser.");
   if (options["persistent-bridge"] && !isAbsolute(options["persistent-bridge"])) throw new Error("--persistent-bridge requires an absolute stdio proxy path.");
+  if (options["bridge-wait-seconds"] !== undefined && !options["persistent-bridge"]) {
+    throw new Error("--bridge-wait-seconds can be used only with --persistent-bridge.");
+  }
   if (options.browser && !["chrome", "edge"].includes(String(options.browser).toLowerCase())) throw new Error("--browser must be chrome or edge.");
   if (options["user-data-dir"] && !options.browser) throw new Error("--user-data-dir can be used only with --browser.");
   const issueIdentifier = String(options.issue).toUpperCase();
@@ -90,12 +98,17 @@ function parseArguments(argv) {
   if (targetId && !TARGET_ID_PATTERN.test(targetId)) throw new Error("--target-id must be a safe bounded target identifier.");
   const ttlSeconds = options["ttl-seconds"] === undefined ? 300 : Number(options["ttl-seconds"]);
   if (!Number.isInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > 3600) throw new Error("--ttl-seconds must be an integer from 1 through 3600.");
+  const bridgeWaitText = options["bridge-wait-seconds"] === undefined ? "120" : options["bridge-wait-seconds"];
+  if (!CANONICAL_INTEGER_PATTERN.test(bridgeWaitText)) throw new Error("--bridge-wait-seconds must be a canonical integer from 1 through 300.");
+  const bridgeWaitSeconds = Number(bridgeWaitText);
+  if (bridgeWaitSeconds < 1 || bridgeWaitSeconds > 300) throw new Error("--bridge-wait-seconds must be a canonical integer from 1 through 300.");
   return {
     command,
     operands: positional,
     cdp: options.cdp || "",
     browser: options.browser ? String(options.browser).toLowerCase() : "",
     persistentBridge: options["persistent-bridge"] || "",
+    bridgeWaitMs: bridgeWaitSeconds * 1000,
     userDataDir: options["user-data-dir"] || "",
     targetId,
     issueIdentifier,
@@ -386,14 +399,14 @@ function daemonRecoveryError(error, persistentBridgePath) {
   } else if (errorKind === "daemon_timeout") {
     message = `The persistent Chrome daemon did not respond before the timeout. Run ${statusCommand}. backend_connected: true does not prove that the lease is free. Do not kill or restart a process automatically. No request was retried.`;
   } else if (errorKind === "proxy_lifecycle") {
-    message = `The persistent Chrome stdio proxy did not complete its lifecycle. Run ${statusCommand}. backend_connected: true does not prove that the lease is free. Do not kill or restart a process automatically. No request was retried.`;
+    message = `${text} Run ${statusCommand}. backend_connected: true does not prove that the lease is free. Do not kill or restart a process automatically. No request was retried.`;
   } else if (errorKind === "rpc_error") {
     message = `${text} Run ${statusCommand}. backend_connected: true does not prove that the lease is free. Do not kill or restart a process automatically. No request was retried.`;
   } else if (errorKind === "generic_bridge_error") {
     message = `${text} Run ${statusCommand}. Check the exact owner and process state. Do not kill or restart a process automatically. No request was retried.`;
   }
   const mapped = new Error(message);
-  for (const key of ["rpcCode", "rpcMessage", "rpcData", "data", "status", "method", "transportResponded", "mutationStarted"]) {
+  for (const key of ["rpcCode", "rpcMessage", "rpcData", "data", "status", "method", "transportResponded", "mutationStarted", "dispatched", "tokenConsumed"]) {
     if (original[key] !== undefined) mapped[key] = original[key];
   }
   mapped.errorKind = errorKind;
@@ -418,6 +431,8 @@ function bridgeErrorOutput(error) {
   else if (Number.isSafeInteger(error?.leaseOwner?.owner_pid)) output.leaseOwner = { owner_pid: error.leaseOwner.owner_pid };
   if (error?.transportResponded === true) output.transportResponded = true;
   if (error?.mutationStarted === false) output.mutationStarted = false;
+  if (error?.dispatched === false || error?.data?.dispatched === false) output.dispatched = false;
+  if (error?.tokenConsumed === true) output.tokenConsumed = true;
   if (error?.indeterminate === true) output.indeterminate = true;
   return output;
 }
@@ -832,7 +847,7 @@ function createToken(state, record) {
 
 function validatePlanToken(record, { issueIdentifier, operation, targetId, now = Date.now() }) {
   if (!record || typeof record !== "object") throw new Error("The plan token was not found.");
-  if (operation === "upload" && record.tokenSchemaVersion !== 2) throw new Error("This upload plan token predates 0.9.6 and cannot be applied safely.");
+  if (operation === "upload" && record.tokenSchemaVersion !== 2) throw new Error("This upload plan token predates upload token schema v2 and cannot be applied safely.");
   if (record.consumed) throw new Error("The plan token was already used.");
   if (record.expiresAt <= now) throw new Error("The plan token expired.");
   if (record.issueIdentifier !== issueIdentifier || record.operation !== operation) throw new Error("The plan token is bound to a different issue or operation.");
@@ -996,8 +1011,13 @@ async function createPlan(cli, client, contextId) {
   return { ...publicResult, inventory, token: saved.token, expiresAt: saved.expiresAt };
 }
 
-async function observedInventoryAfterUpload(client, contextId, fallback) {
-  try { return await getCurrentInventory(client, contextId); } catch { return fallback; }
+async function observedInventoryAfterUpload(client, contextId, fallback, { propagateProvedPreDispatchLeaseBusy = false } = {}) {
+  try {
+    return await getCurrentInventory(client, contextId);
+  } catch (error) {
+    if (propagateProvedPreDispatchLeaseBusy && isProvedPreDispatchLeaseBusy(error)) throw error;
+    return fallback;
+  }
 }
 
 async function transferUploadFiles(client, contextId, actionableFiles, snapshot, now = () => Date.now()) {
@@ -1066,6 +1086,10 @@ async function applyUploadPlan(cli, client, contextId, token, record, preTransfe
         cli?.snapshotNowForTest || client?.snapshotNowForTest || (() => Date.now())
       );
     } catch (error) {
+      if (isProvedPreDispatchLeaseBusy(error)) {
+        retainSnapshot = error.uploadSelectionMayHaveChanged === true;
+        throw error;
+      }
       retainSnapshot = true;
       observed = await observedInventoryAfterUpload(client, contextId, preTransferInventory);
       return finish(normalizeIndeterminateApplyResult(cli, "upload", record, token, {
@@ -1073,7 +1097,14 @@ async function applyUploadPlan(cli, client, contextId, token, record, preTransfe
         inventory: observed
       }));
     }
-    observed = await observedInventoryAfterUpload(client, contextId, preTransferInventory);
+    try {
+      observed = await observedInventoryAfterUpload(client, contextId, preTransferInventory, {
+        propagateProvedPreDispatchLeaseBusy: true
+      });
+    } catch (error) {
+      if (isProvedPreDispatchLeaseBusy(error)) retainSnapshot = true;
+      throw error;
+    }
     if (JSON.stringify(observed) !== JSON.stringify(preTransferInventory)) {
       retainSnapshot = true;
       return finish(normalizeIndeterminateApplyResult(cli, "upload", record, token, {
@@ -1129,6 +1160,7 @@ async function applyUploadPlan(cli, client, contextId, token, record, preTransfe
       return finish({ ...result, token, tokenConsumed: true });
     } catch (error) {
       retainSnapshot = true;
+      if (isProvedPreDispatchLeaseBusy(error)) throw error;
       observed = await observedInventoryAfterUpload(client, contextId, observed);
       return finish(normalizeIndeterminateApplyResult(cli, "upload", record, token, {
         error: `The upload authorization or apply result is uncertain after file transfer. ${error instanceof Error ? error.message : String(error)} No retry was attempted.`,
@@ -1196,7 +1228,14 @@ async function applyPlan(cli, client, contextId) {
     throw error;
   }
 
-  if (operation === "upload") return applyUploadPlan(cli, client, contextId, token, record, inventory, uploadSnapshot);
+  if (operation === "upload") {
+    try {
+      return await applyUploadPlan(cli, client, contextId, token, record, inventory, uploadSnapshot);
+    } catch (error) {
+      if (error && (typeof error === "object" || typeof error === "function")) error.tokenConsumed = true;
+      throw error;
+    }
+  }
   const applyTimeoutMs = cli.command === "apply-upload"
     ? APPLY_UPLOAD_TIMEOUT_MS
     : cli.command === "apply-download" ? APPLY_DOWNLOAD_TIMEOUT_MS : APPLY_DELETE_TIMEOUT_MS;
@@ -1211,6 +1250,7 @@ async function applyPlan(cli, client, contextId) {
         error: `The direct apply dispatch is indeterminate and may still be running. ${error instanceof Error ? error.message : String(error)}`
       });
     }
+    if (error && (typeof error === "object" || typeof error === "function")) error.tokenConsumed = true;
     throw error;
   }
   const completeResult = result && typeof result === "object"
@@ -1296,7 +1336,10 @@ async function run() {
   try {
     try {
       activePersistentBridgePath = cli.persistentBridge;
-      if (cli.persistentBridge) client = await new PersistentBridgeClient(cli.persistentBridge, cli.issueIdentifier, { targetId: cli.targetId }).attach();
+      if (cli.persistentBridge) client = await new PersistentBridgeClient(cli.persistentBridge, cli.issueIdentifier, {
+        targetId: cli.targetId,
+        leaseWaitMs: cli.bridgeWaitMs
+      }).attach();
       else client = cli.browser
         ? await attachToBrowserIssue(cli.browser, cli.userDataDir, cli.issueIdentifier, cli.targetId)
         : await attachToExistingIssue(cli.cdp, cli.issueIdentifier, cli.targetId);

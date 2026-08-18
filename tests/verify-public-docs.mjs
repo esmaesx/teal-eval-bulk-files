@@ -14,6 +14,21 @@ const expectedImages = [
 const excludedParts = new Set([".git", ".codex", "node_modules", "artifacts"]);
 const forbiddenInternalLabel = /tab-test/i;
 const realIssueUrl = /https:\/\/platform-teal-alpha\.vercel\.app\/issue\/[A-Z][A-Z0-9]+-\d+/i;
+const releaseDocs = [
+  "README.md",
+  "CHANGELOG.md",
+  "extension/README.md",
+  "docs/cli-guide.md",
+  "skill/SKILL.md",
+  "skill/references/cli-contract.md"
+];
+const agentSafetyDocs = [
+  "README.md",
+  "extension/README.md",
+  "docs/cli-guide.md",
+  "skill/SKILL.md",
+  "skill/references/cli-contract.md"
+];
 
 async function collectMarkdown(directory) {
   const files = [];
@@ -55,6 +70,23 @@ for (const relativePath of expectedImages) {
     failures.push(`${relativePath}: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
+
+for (const relativePath of releaseDocs) {
+  const content = await readFile(resolve(root, relativePath), "utf8");
+  if (!content.includes("0.9.8")) failures.push(`${relativePath}: does not name release 0.9.8.`);
+  if (!content.includes("0.1.3")) failures.push(`${relativePath}: does not name required bridge 0.1.3.`);
+}
+for (const relativePath of agentSafetyDocs) {
+  const content = await readFile(resolve(root, relativePath), "utf8");
+  if (!content.includes("-PersistentBridgePath")) failures.push(`${relativePath}: does not require the persistent wrapper for agent file work.`);
+  if (!content.includes("chrome-devtools-mcp") || !content.includes("Claude `--chrome`")) {
+    failures.push(`${relativePath}: does not warn against direct agent Chrome clients.`);
+  }
+}
+const changelog = await readFile(resolve(root, "CHANGELOG.md"), "utf8");
+if (!/^## 0\.9\.8 - 2026-08-17$/mu.test(changelog)) failures.push("CHANGELOG.md: missing the dated 0.9.8 entry.");
+if (!/^## 0\.9\.7 - 2026-08-17$/mu.test(changelog)) failures.push("CHANGELOG.md: missing the 0.9.7 history entry.");
+if (!/^## 0\.9\.6$/mu.test(changelog)) failures.push("CHANGELOG.md: missing the 0.9.6 history entry.");
 
 if (failures.length) {
   process.stderr.write(`${failures.join("\n")}\n`);

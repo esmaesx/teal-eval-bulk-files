@@ -5,7 +5,7 @@ description: Manage and verify staged files on Tacit Teal eval issue pages throu
 
 # Teal Eval Bulk CLI
 
-Use the version 0.9.6 CLI in the repository's `extension` directory. The wrapper resolves it from, in order:
+Use the version 0.9.8 CLI in the repository's `extension` directory. Persistent mode requires Chrome DevTools MCP persistent bridge 0.1.3. The wrapper resolves the CLI from, in order:
 
 1. the explicit `-ExtensionRoot` value;
 2. `TEAL_EVAL_BULK_EXTENSION_ROOT`;
@@ -13,23 +13,28 @@ Use the version 0.9.6 CLI in the repository's `extension` directory. The wrapper
 
 Read [references/cli-contract.md](references/cli-contract.md) before the first non-read-only operation in a conversation or when browser selection, CDP setup, or result handling is unclear.
 
+For all agent-driven Teal file work, use `scripts/invoke-teal-cli.ps1` with `-PersistentBridgePath`. Do not start a separate `chrome-devtools-mcp` process or a Claude `--chrome` session. Those clients bypass the shared lease and can cause repeated Chrome approval prompts. Direct wrapper modes are for an explicit operator fallback only.
+
 ## Start with a batch
 
 Use one plan for all files in the requested batch. The wrapper accepts `-Files`, `-Paths`, and `-Names` as clear aliases for `-Operands`. It accepts `-PlanToken` for an apply token.
 
 ```powershell
 $plan = & "<skill-root>\scripts\invoke-teal-cli.ps1" `
-  -Browser edge -Issue "DEMO-204" -Command plan-upload `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue "DEMO-204" -Command plan-upload `
   -Files "C:\work\evidence.csv","C:\work\notes.txt" | ConvertFrom-Json
 
 $plan.actionableFiles
 
 & "<skill-root>\scripts\invoke-teal-cli.ps1" `
-  -Browser edge -Issue "DEMO-204" -Command apply-upload `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue "DEMO-204" -Command apply-upload `
   -PlanToken $plan.token
 
 $after = & "<skill-root>\scripts\invoke-teal-cli.ps1" `
-  -Browser edge -Issue "DEMO-204" -Command list | ConvertFrom-Json
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue "DEMO-204" -Command list | ConvertFrom-Json
 ```
 
 Treat `actionableFiles` as the approved manifest. After apply, run `list`. For each manifest item, require one and only one staged row with the same complete filename and SHA-256 value. Report a missing, changed, or repeated row as a failure. Use `verify` only when the local paths are the complete intended replacement set for all staged files. Do not use exact-set `verify` for a partial upload batch.
@@ -45,7 +50,7 @@ Treat `actionableFiles` as the approved manifest. After apply, run `list`. For e
    ```
 
 4. Show the open sessions with browser name, attach mode, profile root when known, remote-debugging setup URL, and Teal issue targets when the endpoint can list them. Ask the user which browser/session to use. Do not choose for the user.
-5. If the user selects a Chrome session that has a configured persistent bridge, prefer that bridge and pass its absolute stdio-proxy path with `-PersistentBridgePath`. Use persistent mode for work with several commands. The portable wrapper has no machine-specific default. Bridge availability does not select the session. Direct mode can show a local browser permission prompt.
+5. If the user selects a Chrome session that has a configured persistent bridge, prefer that bridge and pass its absolute stdio-proxy path with `-PersistentBridgePath`. Use persistent mode for work with several commands. Its cooperative lease wait defaults to 120 seconds. Pass `-BridgeWaitSeconds` only when the task needs a different integer from 1 through 300. The portable wrapper has no machine-specific path default. Bridge availability does not select the session. Direct mode can show a local browser permission prompt.
 6. `BrowserSession` means the open Chrome or Edge session has a protected `DevToolsActivePort` record. Use `-Browser chrome` or `-Browser edge`. The browser can show one local debugging permission prompt. The user must approve that prompt; it is separate from CLI plan authority and the download Save As dialog.
 7. `RemoteDebuggingDisabled` means the browser is open but has not enabled its protected local debugging bridge. Ask the user to open the returned `chrome://inspect/#remote-debugging` or `edge://inspect/#remote-debugging` URL, enable remote debugging, and tell you when it is ready. Do not navigate to or change that browser setting for the user.
 8. If discovery returns no open supported session, ask: "Which browser and browser profile should I use?" Offer to use an open browser after the user enables its protected local bridge, an already CDP-enabled session, or a separate debug profile. Start or restart a browser only after explicit authority.
@@ -76,6 +81,7 @@ For a user-selected session through an explicit persistent bridge:
 ```powershell
 & "<skill-root>\scripts\invoke-teal-cli.ps1" `
   -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -BridgeWaitSeconds 120 `
   -Issue "DEMO-204" `
   -Command list
 ```
@@ -143,7 +149,7 @@ Use `stop` immediately when the user asks to stop an active batch. Do not wait f
 - Report `succeeded`, `skipped`, `failed`, and `remaining` separately.
 - For download, also report `archiveFilename` and `downloadId`.
 - Treat exit code 2 as usage failure, 3 as persistent-bridge, session, or CDP failure, and 4 as operation failure.
-- Read `errorKind`. Only `daemon_absent` permits daemon start advice. For `lease_busy`, preserve an authenticated owner PID. Keep `held_unknown` unknown. Do not expose owner command lines, tokens, or page data. For `lease_busy`, `daemon_timeout`, `proxy_lifecycle`, `rpc_error`, or `generic_bridge_error`, run read-only status checks and inspect the exact owner and process state. Do not kill or restart a process by count or age.
+- Read `errorKind`. Only `daemon_absent` permits daemon start advice. A cooperative queue timeout is `lease_busy` with `dispatched: false`, exits `3`, and does not permit confirmation or resend. If an apply already claimed its one-use token, the error also has `tokenConsumed: true`; the token stays consumed. For `lease_busy`, preserve an authenticated owner PID. Keep `held_unknown` unknown. Do not expose owner command lines, tokens, or page data. For `lease_busy`, `daemon_timeout`, `proxy_lifecycle`, `rpc_error`, or `generic_bridge_error`, run read-only status checks and inspect the exact owner and process state. Do not kill or restart a process by count or age.
 - Never retry `apply-upload`, `apply-download`, or `apply-delete` after an uncertain result. For upload, an error after transfer without a proved terminal result is `indeterminate`. A direct apply error after dispatch without a proved terminal result is also `indeterminate`. Run `status` and `list`, review `uploadedBeforeFailure` with the operator, explain only observed state, then create a new plan only with user authority.
 - The private upload snapshot uses an owner-only per-user root and strict non-reparse containment. Construction, transfer, and browser activity have separate bounded deadlines. The extension upload batch ends after two hours. Browser-active bytes remain for 150 minutes. A proved terminal result removes them. On uncertainty, cleanup removes only an exact expired snapshot. An active or ambiguous directory stays unchanged. A cleanup warning does not permit a retry.
 - For delete, require a present non-loading staged-files panel for both observations. A present empty panel is valid. A missing or loading panel before mutation causes zero delete dispatch. Report `inventoryBefore`, `inventoryAfter`, and the `inventory` alias. If `inventoryObservationError` is present after mutation, the token is consumed and the result is indeterminate. Run read-only `list`, report the terminal arrays, and do not replay the apply.
@@ -152,4 +158,4 @@ Use `stop` immediately when the user asks to stop an active batch. Do not wait f
 - Do not expose cookies, tokens, authorization headers, profile secrets, private browser WebSocket paths, or unrelated tab URLs.
 - Do not use a real Teal issue for testing. Use only the repository's fictional local demo issue in a dedicated temporary profile when a test is explicitly requested.
 
-The current human interface already shows SHA-256 prefixes in delete review and per-file progress during batch work. Version 0.9.6 does not change the visual interface.
+The current human interface already shows SHA-256 prefixes in delete review and per-file progress during batch work. Version 0.9.8 does not change the visual interface.

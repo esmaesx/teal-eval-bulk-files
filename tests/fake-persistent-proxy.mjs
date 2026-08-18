@@ -2,6 +2,18 @@
 import { basename } from "node:path";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
+const proxyArguments = process.argv.slice(2);
+if (proxyArguments.length !== 3
+  || proxyArguments[0] !== "chrome-devtools"
+  || proxyArguments[1] !== "--lease-wait-ms"
+  || !/^(?:0|[1-9][0-9]*)$/.test(proxyArguments[2])) {
+  throw new Error("The fake persistent proxy received unexpected arguments.");
+}
+const leaseWaitMs = Number(proxyArguments[2]);
+if (!Number.isInteger(leaseWaitMs) || leaseWaitMs < 750 || leaseWaitMs > 300_000) {
+  throw new Error("The fake persistent proxy received an out-of-range lease wait.");
+}
+
 const statePath = process.env.TEAL_FAKE_MCP_STATE;
 if (!statePath) throw new Error("TEAL_FAKE_MCP_STATE is required.");
 
@@ -62,6 +74,7 @@ function defaultInventory() {
 function initialState() {
   return {
     calls: [],
+    chromeDispatches: [],
     commandEnvelopes: [],
     page: { id: 7, url: "http://127.0.0.1:8769/issue/TAB-TEST", title: "TAB-TEST local fixture" },
     documentId: "11111111-2222-4333-8444-555555555555",
@@ -282,12 +295,24 @@ function bridgeResult(state, envelope) {
 const toolSequence = [];
 async function callTool(name, args) {
   const state = loadState();
-  state.calls.push({ session: process.pid, name, args });
+  state.calls.push({ session: process.pid, name, args, leaseWaitMs });
   saveState(state);
+  if (name === "list_pages" && state.queueBusyNextListPages === true) {
+    state.queueBusyNextListPages = false;
+    state.queueBusyEvents = Number(state.queueBusyEvents || 0) + 1;
+    saveState(state);
+    return failure("The authenticated browser transport lease wait expired.", "lease_busy", {
+      dispatched: false,
+      automatic_retry_allowed: false,
+      owner_pid: 4321
+    });
+  }
   if (toolSequence.length === 0 && name !== "list_pages") return failure("Call list_pages first.");
   if (toolSequence.length === 1 && name !== "select_page") return failure("Call select_page second.");
   if (toolSequence.length >= 2) return failure("One action is allowed per fake proxy session.");
   toolSequence.push(name);
+  state.chromeDispatches.push({ session: process.pid, name });
+  saveState(state);
   if (name === "list_pages") return success({ pages: state.page ? [state.page] : [] });
   if (name === "select_page") {
     if (args.pageId !== state.page.id || args.bringToFront !== false) return failure("The wrong page was selected.");
@@ -298,9 +323,18 @@ async function callTool(name, args) {
 
 async function actionTool(name, args) {
   const state = loadState();
-  state.calls.push({ session: process.pid, name, args });
+  state.calls.push({ session: process.pid, name, args, leaseWaitMs });
+  state.chromeDispatches.push({ session: process.pid, name });
   saveState(state);
-  if (name === "take_snapshot") return success({ snapshot: snapshot(state) });
+  if (name === "take_snapshot") {
+    const previousCommand = state.commandEnvelopes.at(-1)?.command?.command;
+    if (state.queueBusyBeforeApplyFill === true && previousCommand === "list") {
+      state.queueBusyBeforeApplyFill = false;
+      state.queueBusyNextListPages = true;
+      saveState(state);
+    }
+    return success({ snapshot: snapshot(state) });
+  }
   if (name === "fill") {
     if (args.uid !== "command-uid" || typeof args.value !== "string") return failure("The command control was invalid.");
     const envelope = JSON.parse(args.value);
@@ -351,7 +385,14 @@ process.stdin.on("data", (chunk) => {
     } else if (request.method === "initialize" && rpcMode === "lease_busy") {
       send({ jsonrpc: "2.0", id: request.id, error: { code: -32603, message: "fake browser transport lease is busy", data: { status: "lease_busy", owner: null } } });
     } else if (request.method === "initialize") {
-      respond({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fake", version: "1" } });
+      respond({
+        protocolVersion: "2025-06-18",
+        capabilities: { tools: {} },
+        serverInfo: {
+          name: process.env.TEAL_FAKE_SERVER_NAME || "chrome-devtools-persistent-gateway",
+          version: process.env.TEAL_FAKE_SERVER_VERSION || "0.1.3"
+        }
+      });
     } else if (request.method === "tools/list") {
       respond({ tools });
     } else if (request.method === "test/echo") {

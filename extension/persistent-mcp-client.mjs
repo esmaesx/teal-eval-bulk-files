@@ -5,7 +5,12 @@ import { basename, isAbsolute, resolve } from "node:path";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";
 const PERSISTENT_BRIDGE_PROTOCOL_VERSION = 1;
-const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.6";
+const PERSISTENT_BRIDGE_EXTENSION_VERSION = "0.9.8";
+const PERSISTENT_GATEWAY_NAME = "chrome-devtools-persistent-gateway";
+const PERSISTENT_GATEWAY_VERSION = "0.1.3";
+const DEFAULT_LEASE_WAIT_MS = 120_000;
+const MIN_LEASE_WAIT_MS = 1_000;
+const MAX_LEASE_WAIT_MS = 300_000;
 const REQUEST_PATTERN = /^[A-Za-z0-9_-]{16,80}$/;
 const DOCUMENT_PATTERN = /^[A-Za-z0-9-]{16,80}$/;
 const RESULT_PREFIX = "TEAL_CLI_RESULT_";
@@ -36,6 +41,14 @@ function exactKeys(value, keys) {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function validateLeaseWaitMs(value) {
+  const leaseWaitMs = value === undefined ? DEFAULT_LEASE_WAIT_MS : value;
+  if (!Number.isInteger(leaseWaitMs) || leaseWaitMs < MIN_LEASE_WAIT_MS || leaseWaitMs > MAX_LEASE_WAIT_MS) {
+    throw new Error("The persistent bridge lease wait must be an integer from 1000 through 300000 milliseconds.");
+  }
+  return leaseWaitMs;
 }
 
 function sanitizeDiagnosticText(value, fallback = "The persistent Chrome tool failed.") {
@@ -86,6 +99,7 @@ class McpToolError extends Error {
     this.status = options.status || "tool_failed";
     this.data = sanitizeStructuredData(options.data);
     this.indeterminate = options.indeterminate === true;
+    if (options.dispatched === false) this.dispatched = false;
   }
 }
 
@@ -181,6 +195,7 @@ class McpStdioSession {
     this.stderrBuffer = "";
     this.closed = false;
     this.starting = true;
+    this.leaseWaitMs = validateLeaseWaitMs(options.leaseWaitMs);
     this.shutdownGraceMs = Number.isInteger(options.shutdownGraceMs) && options.shutdownGraceMs >= 1 ? options.shutdownGraceMs : 2_000;
     this.shutdownTermMs = Number.isInteger(options.shutdownTermMs) && options.shutdownTermMs >= 1 ? options.shutdownTermMs : 2_000;
     this.shutdownResult = null;
@@ -205,7 +220,12 @@ class McpStdioSession {
       throw proxyLifecycleError("The persistent Chrome stdio proxy was not found.");
     }
     if (!stat.isFile() || stat.isSymbolicLink()) throw proxyLifecycleError("The persistent Chrome stdio proxy was not a safe regular file.");
-    this.child = this.spawnProcess(process.execPath, [this.proxyPath, "chrome-devtools"], {
+    this.child = this.spawnProcess(process.execPath, [
+      this.proxyPath,
+      "chrome-devtools",
+      "--lease-wait-ms",
+      String(this.leaseWaitMs)
+    ], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       env: { ...process.env }
@@ -226,6 +246,11 @@ class McpStdioSession {
       clientInfo: { name: "teal-eval-bulk-cli", version: PERSISTENT_BRIDGE_EXTENSION_VERSION }
     }, 20_000);
     if (!isPlainObject(initialized) || typeof initialized.protocolVersion !== "string") throw new Error("The persistent Chrome proxy returned an invalid initialize result.");
+    if (!isPlainObject(initialized.serverInfo)
+      || initialized.serverInfo.name !== PERSISTENT_GATEWAY_NAME
+      || initialized.serverInfo.version !== PERSISTENT_GATEWAY_VERSION) {
+      throw proxyLifecycleError(`Teal Eval Bulk Files requires ${PERSISTENT_GATEWAY_NAME} ${PERSISTENT_GATEWAY_VERSION}.`);
+    }
     this.notify("notifications/initialized", {});
     const manifest = await this.request("tools/list", {}, 20_000);
     this.validateToolManifest(manifest?.tools);
@@ -346,7 +371,8 @@ class McpStdioSession {
       throw new McpToolError(errorText(result), {
         status,
         data: result.structuredContent?.data ?? result.structuredContent,
-        indeterminate: status === "indeterminate_mutating_call"
+        indeterminate: status === "indeterminate_mutating_call",
+        dispatched: result.structuredContent?.data?.dispatched ?? result.structuredContent?.dispatched
       });
     }
     if (!isPlainObject(result)) throw new Error(`The persistent Chrome proxy returned an invalid ${name} result.`);
@@ -527,12 +553,19 @@ function decodeTerminalMarker(result, requestId, commandName, expected) {
   return { payload, result: payload.result };
 }
 
+function isProvedPreDispatchLeaseBusy(error) {
+  return error instanceof McpToolError
+    && ["lease_busy", "held_unknown"].includes(error.status)
+    && error.data?.dispatched === false;
+}
+
 class PersistentBridgeClient {
   constructor(proxyPath, issueIdentifier, options = {}) {
     if (typeof proxyPath !== "string" || !isAbsolute(proxyPath)) throw new Error("The persistent Chrome stdio proxy path must be absolute.");
     this.proxyPath = resolve(proxyPath);
     this.issueIdentifier = issueIdentifier;
     this.sessionOptions = options.sessionOptions || {};
+    this.leaseWaitMs = validateLeaseWaitMs(options.leaseWaitMs);
     this.targetId = "";
     this.requestedTargetId = options.targetId || "";
     if (this.requestedTargetId && !TARGET_ID_PATTERN.test(this.requestedTargetId)) throw new Error("The persistent Chrome target identifier was invalid.");
@@ -543,12 +576,15 @@ class PersistentBridgeClient {
   }
 
   async withSession(callback) {
-    const session = await McpStdioSession.open(this.proxyPath, this.sessionOptions);
+    const session = await McpStdioSession.open(this.proxyPath, {
+      ...this.sessionOptions,
+      leaseWaitMs: this.leaseWaitMs
+    });
     try { return await callback(session); } finally { await session.close(); }
   }
 
   async selectExpectedPage(session) {
-    const listed = await session.callTool("list_pages", {}, 45_000);
+    const listed = await session.callTool("list_pages", {}, 45_000 + this.leaseWaitMs);
     const pages = parsePageListResult(listed);
     const page = selectAllowedPage(pages, this.issueIdentifier, this.requestedTargetId);
     const pageIdValue = Number(page.id);
@@ -642,6 +678,7 @@ class PersistentBridgeClient {
       await this.performTool("fill", { uid: commandUid, value, includeSnapshot: false }, Math.max(70_000, value.length * 12));
       dispatched = true;
     } catch (error) {
+      if (isProvedPreDispatchLeaseBusy(error)) throw error;
       try {
         await this.confirmDispatchAfterIndeterminate(requestId, Date.now() + 30_000);
         dispatched = true;
@@ -693,6 +730,7 @@ class PersistentBridgeClient {
       resolvedPaths.push(absolute);
       names.push(name);
     }
+    let selectedFileCount = 0;
     const prepared = await this.callBridge({ command: "prepare-upload" }, { timeoutMs: 30_000 });
     if (prepared.result?.ok !== true) throw new Error(prepared.result?.error || "The extension did not prepare the CLI upload selection.");
     try {
@@ -700,10 +738,15 @@ class PersistentBridgeClient {
         const uploadUid = await this.resolveControlUid(UPLOAD_CONTROL_NAME);
         if (typeof beforeFileSelection === "function") await beforeFileSelection(filePath);
         await this.performTool("upload_file", { uid: uploadUid, filePath, includeSnapshot: false }, 70_000);
+        selectedFileCount += 1;
         if (typeof afterFileSelection === "function") await afterFileSelection(filePath);
       }
       return names;
     } catch (error) {
+      if (isProvedPreDispatchLeaseBusy(error)) {
+        if (selectedFileCount > 0) error.uploadSelectionMayHaveChanged = true;
+        throw error;
+      }
       try { await this.callBridge({ command: "cancel-upload" }, { timeoutMs: 30_000 }); } catch { }
       throw error;
     }
@@ -730,6 +773,7 @@ export {
   findUniqueUid,
   findUniqueUidInToolResult,
   issueFromTargetUrl,
+  isProvedPreDispatchLeaseBusy,
   parsePageListResult,
   sanitizeDiagnosticText,
   sanitizeStructuredData,

@@ -1,6 +1,6 @@
 {
   "name": "teal-eval-bulk-files",
-  "version": "0.9.6",
+  "version": "0.9.8",
   "private": true,
   "description": "Browser extension, local CLI, Codex skill, and local mock tests for Teal eval staged files.",
   "scripts": {

@@ -7,7 +7,7 @@ Teal Eval Bulk Files adds reliable batch file controls to Tacit Teal eval issue 
 - a Codex skill that selects an open browser session and calls the CLI;
 - a complete local-only demonstration page and repeatable screenshot tests.
 
-Current release: `0.9.6`.
+Current release: `0.9.8`.
 
 ![Complete fictional eval page with the Bulk files control](docs/images/eval-page-overview.png)
 
@@ -17,15 +17,18 @@ Use one plan for all requested files. Keep the returned `actionableFiles` as the
 
 ```powershell
 $plan = & .\skill\scripts\invoke-teal-cli.ps1 `
-  -Browser edge -Issue DEMO-204 -Command plan-upload `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command plan-upload `
   -Files "C:\work\evidence.csv","C:\work\notes.txt" | ConvertFrom-Json
 
 & .\skill\scripts\invoke-teal-cli.ps1 `
-  -Browser edge -Issue DEMO-204 -Command apply-upload `
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command apply-upload `
   -PlanToken $plan.token
 
 & .\skill\scripts\invoke-teal-cli.ps1 `
-  -Browser edge -Issue DEMO-204 -Command list
+  -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -Issue DEMO-204 -Command list
 ```
 
 Use `verify` only when the local paths are the complete intended replacement set for all staged files. For a partial upload, use the plan manifest and a new `list` result.
@@ -78,13 +81,18 @@ If the skill is not kept beside the repository's `extension` directory, set `TEA
 
 The CLI attaches to an already open browser session. It does not launch a browser, log in, or navigate. Select the exact browser or session first. The wrapper then requires exactly one transport: an explicit persistent stdio-proxy path, a current Chrome or Edge session, or an explicit loopback CDP endpoint.
 
-The [Chrome DevTools MCP persistent bridge](https://github.com/esmaesx/chrome-devtools-mcp-persistent-bridge) is an optional transport for a user-selected Chrome session. It is in a separate repository. Keep its checkout separate from this repository, and pass the absolute path to its `runtime/stdio-proxy.mjs` file. The portable wrapper has no machine-specific default:
+The [Chrome DevTools MCP persistent bridge](https://github.com/esmaesx/chrome-devtools-mcp-persistent-bridge) is an optional transport for a user-selected Chrome session. Teal Eval Bulk Files 0.9.8 requires bridge 0.1.3. Keep the bridge checkout separate from this repository, and pass the absolute path to its `runtime/stdio-proxy.mjs` file. The portable wrapper has no machine-specific path default:
 
 ```powershell
 & .\skill\scripts\invoke-teal-cli.ps1 `
   -PersistentBridgePath "<absolute-path-to-stdio-proxy.mjs>" `
+  -BridgeWaitSeconds 120 `
   -Issue DEMO-204 -Command status
 ```
+
+Persistent mode waits up to 120 seconds for a busy shared bridge lease by default. `-BridgeWaitSeconds` and CLI `--bridge-wait-seconds` accept only a canonical integer from 1 through 300. They are not valid with direct `-Browser`, `-CdpEndpoint`, `--browser`, or `--cdp` modes. The wait happens before Chrome dispatch. Only the first `list_pages` timeout includes the queue wait; `select_page` and the target tool use the same short proxy session and lease. This Teal option does not change the fail-fast settings of configured Codex gateways.
+
+Agent safety rule: For Teal file work, agents must call `invoke-teal-cli.ps1` with `-PersistentBridgePath`. They must not start a separate `chrome-devtools-mcp` process or a Claude `--chrome` session. Those clients bypass the shared lease and can cause repeated Chrome approval prompts. Direct wrapper modes are for an explicit operator fallback only.
 
 For direct current-session mode, enable the browser's protected local debugging bridge at `chrome://inspect/#remote-debugging` or `edge://inspect/#remote-debugging`. Then call the wrapper with the browser and exact issue ID:
 
@@ -141,12 +149,12 @@ See [CLI guide](docs/cli-guide.md) for browser selection, every command, JSON fi
 - Delete plans include `actionableFiles` records with filename, SHA-256, and size. Before a new delete plan, the skill offers and recommends a separate exact-name download backup plan and apply. A cancelled or uncertain backup blocks deletion unless the user explicitly declines the backup.
 - Delete apply reports `inventoryBefore`, `inventoryAfter`, and an `inventory` alias for the after state. If after-state observation fails, run a read-only `list` and do not replay the consumed apply.
 - Never click a page's native **remove** control. Ask the human operator to use it for an ambiguous duplicate row.
-- For persistent transport recovery, run `status.ps1` first. `backend_connected: true` does not prove that the browser lease is free. Start the daemon only when status confirms `daemon_absent` and local authority permits the start. A real proxy startup record with cause `daemon_absent` keeps that classification. Ambiguous output is `proxy_lifecycle`. For `lease_busy`, preserve an authenticated owner PID. Keep `held_unknown` unknown. Never expose owner command lines, tokens, or page data. Check the exact owner and liveness. Do not kill or restart a process by count or age.
+- For persistent transport recovery, run `status.ps1` first. `backend_connected: true` does not prove that the browser lease is free. Start the daemon only when status confirms `daemon_absent` and local authority permits the start. A real proxy startup record with cause `daemon_absent` keeps that classification. Ambiguous output is `proxy_lifecycle`. A queue timeout stays the authenticated `lease_busy` and `dispatched: false` connection path, exits `3`, and does not confirm or resend a tool. If an apply already claimed its one-use token, this error also reports `tokenConsumed: true`; the token stays consumed. For `lease_busy`, preserve an authenticated owner PID. Keep `held_unknown` unknown. Never expose owner command lines, tokens, or page data. Check the exact owner and liveness. Do not kill or restart a process by count or age.
 - Real Teal issues are never used for mutation tests.
 
 Local browser debugging is trusted local mutation authority. The plan controls prevent accidental or stale applies. They cannot protect a debugging session from another hostile local process that already controls it.
 
-The current interface already shows SHA-256 prefixes in delete review and per-file progress. Version 0.9.6 has no visual interface change.
+The current interface already shows SHA-256 prefixes in delete review and per-file progress. Version 0.9.8 has no visual interface change.
 
 ## Documentation
 
@@ -156,6 +164,7 @@ The current interface already shows SHA-256 prefixes in delete review and per-fi
 - [Local demonstration and screenshot reproduction](docs/local-demo.md)
 - [Extension implementation details](extension/README.md)
 - [CLI contract](skill/references/cli-contract.md)
+- [Release history](CHANGELOG.md)
 
 ## Tests
 

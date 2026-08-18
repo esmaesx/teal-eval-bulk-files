@@ -107,6 +107,10 @@ function readMode() {
   return readFileSync(path, 'utf8').trim();
 }
 
+function delay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
 function consumeFailure() {
   const path = process.env.TEAL_TEST_FAILURE_MARKER;
   if (!path || existsSync(path)) return false;
@@ -120,7 +124,7 @@ function resultFor(envelope) {
     ok: true,
     issueIdentifier: 'TAB-TEST',
     persistentBridgeProtocolVersion: 1,
-    extensionVersion: '0.9.6',
+    extensionVersion: '0.9.8',
     documentId,
     targetUrl: pageUrl,
   };
@@ -135,7 +139,7 @@ function resultFor(envelope) {
 function terminalMarker(envelope) {
   const payload = {
     protocolVersion: 1,
-    extensionVersion: '0.9.6',
+    extensionVersion: '0.9.8',
     documentId,
     requestId: envelope.requestId,
     targetUrl: pageUrl,
@@ -149,7 +153,13 @@ function terminalMarker(envelope) {
 async function callTool(name, args) {
   if (name === 'list_pages') return ok({ pages: [{ id: 1, title: 'Local Teal test page', url: pageUrl, selected: true }] });
   if (name === 'select_page') return ok({ ok: true, selectedPageId: args.pageId });
-  if (name === 'take_snapshot') return ok({ snapshot: { id: 'teal-command-uid', name: 'Teal CLI persistent command' } });
+  if (name === 'take_snapshot') {
+    if (process.env.TEAL_TEST_DELAY_TOOL === name && /^\d{1,6}$/.test(process.env.TEAL_TEST_DELAY_MS ?? '')) {
+      appendEvent(name, args, { command: 'test-delay' });
+      await delay(Number(process.env.TEAL_TEST_DELAY_MS));
+    }
+    return ok({ snapshot: { id: 'teal-command-uid', name: 'Teal CLI persistent command' } });
+  }
   if (name === 'fill') {
     let envelope;
     try { envelope = JSON.parse(args.value); } catch { return failure('invalid_test_envelope', 'The local test envelope was invalid.'); }
@@ -261,13 +271,16 @@ async function validateBridgeSourceRoot(candidate, origin) {
   const runtime = join(root, 'runtime');
   const nodeModules = join(root, 'node_modules');
   const fakeBackend = join(root, 'tests', 'fake-chrome-server.mjs');
+  const packagePath = join(root, 'package.json');
   await assertSafeDirectory(root, runtime, 'The bridge runtime source');
   const nodeModulesReal = await assertSafeDirectory(root, nodeModules, 'The bridge dependency source');
   await assertSafeRegularFile(root, fakeBackend, 'The bridge fake backend source');
+  await assertSafeRegularFile(root, packagePath, 'The bridge package manifest');
   for (const name of ['daemon.mjs', 'stdio-proxy.mjs', 'allow-remote-debugging.ps1', 'status.ps1']) {
     await assertSafeRegularFile(root, join(runtime, name), `The bridge runtime source file ${name}`);
   }
-  return { root, runtime, nodeModules, nodeModulesReal, fakeBackend };
+  const packageManifest = JSON.parse(await readFile(packagePath, 'utf8'));
+  return { root, runtime, nodeModules, nodeModulesReal, fakeBackend, packagePath, version: packageManifest.version };
 }
 
 async function resolveBridgeSourceRoot() {
@@ -364,6 +377,114 @@ async function waitForCondition(callback, timeoutMs, message) {
     await delay(40);
   }
   throw new Error(message);
+}
+
+async function createObservedLeaseOwner(fixture) {
+  const sockets = new Set();
+  let observed = false;
+  let resolveContention;
+  const contention = new Promise((resolveObserved) => { resolveContention = resolveObserved; });
+  const status = {
+    pid: process.pid,
+    parent_pid: process.ppid,
+    gateway_instance_id: randomBytes(16).toString('hex'),
+    lease_instance_id: randomBytes(16).toString('hex'),
+    acquired_at_utc: new Date().toISOString(),
+    last_activity_at_utc: new Date().toISOString(),
+    in_flight: true,
+    queue_depth: 1,
+  };
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    socket.setEncoding('utf8');
+    socket.setTimeout(1_000, () => socket.destroy());
+    let buffer = '';
+    let answered = false;
+    socket.on('data', (chunk) => {
+      if (answered) return;
+      buffer += chunk;
+      if (buffer.length > 4_096) {
+        answered = true;
+        socket.destroy();
+        return;
+      }
+      const newline = buffer.indexOf('\n');
+      if (newline < 0) return;
+      answered = true;
+      const line = buffer.slice(0, newline).trim();
+      if (buffer.slice(newline + 1).trim() || !line) {
+        socket.destroy();
+        return;
+      }
+      let request;
+      try { request = JSON.parse(line); } catch { socket.destroy(); return; }
+      const requestKeys = request && typeof request === 'object' && !Array.isArray(request)
+        ? Object.keys(request).sort().join(',')
+        : '';
+      const exactStatusRequest = request
+        && typeof request === 'object'
+        && !Array.isArray(request)
+        && requestKeys === 'operation,token'
+        && request.operation === 'status'
+        && request.token === fixture.token;
+      const exactYieldRequest = request
+        && typeof request === 'object'
+        && !Array.isArray(request)
+        && requestKeys === 'gateway_instance_id,lease_instance_id,operation,token'
+        && request.operation === 'yield'
+        && request.token === fixture.token
+        && request.gateway_instance_id === status.gateway_instance_id
+        && request.lease_instance_id === status.lease_instance_id;
+      if (exactYieldRequest) {
+        socket.end(`${JSON.stringify({
+          operation: 'yield',
+          accepted: false,
+          gateway_instance_id: status.gateway_instance_id,
+          lease_instance_id: status.lease_instance_id,
+          reason: 'owner_busy',
+        })}\n`);
+        return;
+      }
+      if (!exactStatusRequest) {
+        socket.destroy();
+        return;
+      }
+      socket.end(`${JSON.stringify(status)}\n`, () => {
+        if (observed) return;
+        observed = true;
+        resolveContention({ request, status });
+      });
+    });
+    socket.on('error', () => undefined);
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    const onError = (cause) => { server.removeListener('listening', onListening); rejectListen(cause); };
+    const onListening = () => { server.removeListener('error', onError); resolveListen(); };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(fixture.pipes.lease);
+  });
+  let closed = false;
+  return {
+    async waitForContention(timeoutMs = 5_000) {
+      return new Promise((resolveWait, rejectWait) => {
+        const timer = setTimeout(() => rejectWait(new Error('The queued CLI did not present an authenticated lease status request.')), timeoutMs);
+        contention.then((value) => {
+          clearTimeout(timer);
+          resolveWait(value);
+        });
+      });
+    },
+    async close() {
+      if (closed) return;
+      closed = true;
+      await new Promise((resolveClose, rejectClose) => {
+        server.close((cause) => cause ? rejectClose(cause) : resolveClose());
+      });
+      for (const socket of sockets) socket.destroy();
+    },
+  };
 }
 
 function runProcess(file, args, options = {}) {
@@ -463,7 +584,6 @@ async function createFixture(label, options = {}) {
       NODE_ENV: 'test',
       CHROME_DEVTOOLS_MCP_ALLOW_TEST_BACKEND: '1',
       CHROME_DEVTOOLS_MCP_TEST_BACKEND: fixture.backendPath,
-      CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS: '250',
       CHROME_DEVTOOLS_MCP_TEST_SHUTDOWN_DRAIN_MS: '2000',
       FAKE_CHROME_EVENTS_FILE: fixture.eventsPath,
       TEAL_TEST_EVENTS_FILE: fixture.eventsPath,
@@ -514,7 +634,7 @@ async function closeFixture(fixture) {
 
 class RawMcpSession {
   constructor(proxyPath, fixture) {
-    this.child = spawn(process.execPath, [proxyPath, 'chrome-devtools'], {
+    this.child = spawn(process.execPath, [proxyPath, 'chrome-devtools', '--lease-wait-ms', '1000'], {
       cwd: fixture.root,
       env: fixture.env,
       windowsHide: true,
@@ -582,6 +702,8 @@ class RawMcpSession {
       clientInfo: { name: 'teal-cross-repo-test', version: '1.0.0' },
     });
     assert.equal(typeof initialized.protocolVersion, 'string', 'The real proxy did not initialize.');
+    assert.equal(initialized.serverInfo?.name, 'chrome-devtools-persistent-gateway');
+    assert.equal(initialized.serverInfo?.version, '0.1.3');
     this.notify('notifications/initialized', {});
     return this;
   }
@@ -613,6 +735,7 @@ async function runCli(fixture, command) {
     cliPath,
     command,
     '--persistent-bridge', join(fixture.root, proxyRelativePath),
+    '--bridge-wait-seconds', '1',
     '--issue', 'TAB-TEST',
     '--state', statePath,
   ], {
@@ -645,12 +768,17 @@ test('real bridge and public CLI keep isolated transport failures explicit', asy
     t.skip('The bridge source is unavailable. Set TEAL_PERSISTENT_BRIDGE_SOURCE_ROOT to an absolute local bridge source directory to run this cross-repository suite.');
     return;
   }
+  if (bridgeSource.version !== '0.1.3') {
+    t.skip(`The available bridge is ${bridgeSource.version || 'unversioned'}; this release requires bridge 0.1.3.`);
+    return;
+  }
   const watchedFiles = [
     join(publicRoot, 'extension', 'persistent-mcp-client.mjs'),
     cliPath,
     join(bridgeSource.runtime, 'daemon.mjs'),
     join(bridgeSource.runtime, 'stdio-proxy.mjs'),
     bridgeSource.fakeBackend,
+    bridgeSource.packagePath,
   ];
   for (const path of [...watchedFiles, bridgeSource.nodeModules]) {
     const stat = await lstat(path);
@@ -697,18 +825,63 @@ test('real bridge and public CLI keep isolated transport failures explicit', asy
     }
   });
 
-  await t.test('known authenticated lease owner facts reach sanitized CLI JSON without contradiction', async () => {
-    const fixture = await createFixture('lease-owner', { env: { CHROME_DEVTOOLS_MCP_TEST_LEASE_WAIT_MS: '300' } });
+  await t.test('a queued CLI agent proceeds after observed authenticated contention and owner release', async () => {
+    const fixture = await createFixture('cooperative-wait');
     let owner;
+    try {
+      owner = await createObservedLeaseOwner(fixture);
+      const queued = runCli(fixture, 'status');
+      const contention = await owner.waitForContention();
+      assert.deepEqual(Object.keys(contention.request).sort(), ['operation', 'token']);
+      assert.equal(contention.request.operation, 'status');
+      assert.equal(contention.request.token === fixture.token, true, 'The queued CLI did not authenticate its lease status request.');
+      assert.equal(contention.status.pid, process.pid);
+      assert.equal(contention.status.parent_pid, process.ppid);
+      assert.equal(typeof contention.status.lease_instance_id, 'string');
+      assert.equal(contention.status.in_flight, true);
+      assert.equal(contention.status.queue_depth, 1);
+      assert.deepEqual(await readEvents(fixture.eventsPath), [], 'The queued CLI dispatched Chrome work before the held lease was released.');
+      await owner.close();
+      owner = null;
+      const run = await queued;
+      assert.equal(run.exitCode, 0, `Queued CLI returned ${run.exitCode}. ${run.stderr}`);
+      assert.equal(run.json.ok, true);
+    } finally {
+      await owner?.close();
+      await closeFixture(fixture);
+    }
+  });
+
+  await t.test('known authenticated lease owner facts reach sanitized CLI JSON without contradiction', async () => {
+    const fixture = await createFixture('lease-owner', {
+      env: {
+        TEAL_TEST_DELAY_TOOL: 'take_snapshot',
+        TEAL_TEST_DELAY_MS: '5000',
+      },
+    });
+    let owner;
+    let activeOwnerCall;
     try {
       owner = await McpStdioSession.open(join(fixture.root, proxyRelativePath));
       const listed = await owner.callTool('list_pages', {});
       assert.equal(listed.structuredContent?.pages?.length, 1);
+      const selected = await owner.callTool('select_page', { pageId: 1, bringToFront: false });
+      assert.equal(selected.structuredContent?.selectedPageId, 1);
+      activeOwnerCall = owner.callTool('take_snapshot', {});
+      await waitForCondition(async () => {
+        const lease = (await daemonStatus(fixture)).value.lease;
+        const events = await readEvents(fixture.eventsPath);
+        return lease?.state === 'held'
+          && lease.in_flight === true
+          && events.some((event) => event.name === 'take_snapshot');
+      }, 2_000, 'The known lease owner did not enter its delayed backend call.');
       const ownerPid = owner.child.pid;
       const held = (await daemonStatus(fixture)).value.lease;
       assert.equal(held?.state, 'held');
       assert.equal(held.pid, ownerPid);
       assert.equal(held.parent_pid, process.pid);
+      assert.equal(held.in_flight, true);
+      assert.equal(held.queue_depth, 0);
 
       const run = await runCli(fixture, 'status');
       assert.equal(run.exitCode, 3, `Busy CLI returned ${run.exitCode}. ${run.stderr}`);
@@ -725,7 +898,11 @@ test('real bridge and public CLI keep isolated transport failures explicit', asy
       const serialized = JSON.stringify(run.json);
       assert.equal(serialized.includes(fixture.token), false, 'The CLI JSON exposed the daemon token.');
       assert.equal(serialized.includes('dev-newb-chrome-control-'), false, 'The CLI JSON exposed the lease pipe name.');
+      const completedOwnerCall = await activeOwnerCall;
+      activeOwnerCall = null;
+      assert.notEqual(completedOwnerCall.isError, true, 'The delayed owner tool did not complete after the contention check.');
     } finally {
+      await activeOwnerCall?.catch(() => undefined);
       await owner?.close();
       await closeFixture(fixture);
     }

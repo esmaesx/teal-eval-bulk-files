@@ -27,6 +27,7 @@ import {
   selectAllowedTarget,
   verifyFiles
 } from "../extension/teal-eval-bulk-cli.mjs";
+import { McpToolError, PersistentBridgeClient } from "../extension/persistent-mcp-client.mjs";
 
 function row(filename, sha256, sizeText = "4 B") {
   return { filename, sha256, sizeText };
@@ -444,6 +445,133 @@ test("transfer failure before browser-active state gets a fresh retained lifetim
   }
 });
 
+test("post-transfer inventory queue timeout exits 3 and retains the snapshot without a later upload dispatch", { concurrency: false }, async () => {
+  const temp = await mkdtemp(join(tmpdir(), "teal-upload-post-transfer-queue-"));
+  let retainedSnapshot = null;
+  try {
+    const statePath = join(temp, "tokens.json");
+    const uploadPath = join(temp, "selected-before-queue.txt");
+    await writeFile(uploadPath, "selected before the queue timeout", "utf8");
+    const [file] = await inspectUploadFiles([uploadPath]);
+    const token = "post-transfer-inventory-queue-token";
+    const documentId = "11111111-2222-4333-8444-555555555555";
+    const record = {
+      ...uploadRecord(file, []),
+      connectionMode: "persistent",
+      bridgeDocumentId: documentId
+    };
+    await writeFile(statePath, JSON.stringify({ version: 1, tokens: { [token]: record } }), "utf8");
+
+    const proxyPath = fileURLToPath(new URL("./fake-persistent-proxy.mjs", import.meta.url));
+    const client = new PersistentBridgeClient(proxyPath, "TAB-TEST", { leaseWaitMs: 1_000 });
+    client.targetId = record.targetId;
+    client.targetUrl = record.targetUrl;
+    client.targetTitle = record.targetTitle;
+    client.documentId = documentId;
+    const bridgeCommands = [];
+    const browserCalls = [];
+    const selectedPaths = [];
+    let confirmations = 0;
+    let retentionLimits = null;
+    const fakeNow = Date.now() + 5_000;
+    const queueError = new McpToolError("The authenticated browser transport lease wait expired.", {
+      status: "lease_busy",
+      data: { dispatched: false, automatic_retry_allowed: false },
+      dispatched: false
+    });
+    const callBridge = client.callBridge.bind(client);
+    client.callBridge = async (command, options) => {
+      bridgeCommands.push(command.command);
+      if (bridgeCommands.length === 1) return { result: { ok: true, inventory: [] } };
+      return callBridge(command, options);
+    };
+    client.resolveControlUid = async () => {
+      browserCalls.push("list_pages");
+      throw queueError;
+    };
+    client.performTool = async (name) => {
+      browserCalls.push(name);
+      throw new Error(`Unexpected browser tool dispatch: ${name}`);
+    };
+    client.confirmDispatchAfterIndeterminate = async () => { confirmations += 1; };
+    client.uploadFiles = async (paths, hooks) => {
+      assert.equal(paths.length, 1);
+      await hooks.beforeFileSelection(paths[0]);
+      selectedPaths.push(paths[0]);
+      await hooks.afterFileSelection(paths[0]);
+      return paths.map((path) => basename(path));
+    };
+    client.snapshotNowForTest = () => fakeNow;
+    client.retainUploadSnapshotForTest = async (snapshot, limits) => {
+      retainedSnapshot = snapshot;
+      retentionLimits = limits;
+    };
+
+    let rejected = null;
+    await assert.rejects(
+      () => applyPlan({ command: "apply-upload", operands: [token], issueIdentifier: "TAB-TEST", statePath }, client, 9),
+      (error) => {
+        rejected = error;
+        return error === queueError;
+      }
+    );
+    assert.equal(selectedPaths.length, 1);
+    assert.notEqual(selectedPaths[0], uploadPath);
+    assert.deepEqual(bridgeCommands, ["list", "list"]);
+    assert.deepEqual(browserCalls, ["list_pages"]);
+    assert.equal(confirmations, 0);
+    assert.equal((await readState(statePath)).tokens[token].consumed, true);
+
+    const mapped = daemonRecoveryError(rejected, proxyPath);
+    const output = bridgeErrorOutput(mapped);
+    assert.equal(mapped.exitCode, 3);
+    assert.equal(mapped.errorKind, "lease_busy");
+    assert.equal(output.dispatched, false);
+    assert.equal(output.errorData?.dispatched, false);
+    assert.equal(Object.prototype.hasOwnProperty.call(output, "indeterminate"), false);
+    assert.equal(rejected.indeterminate, false);
+
+    assert.ok(retainedSnapshot?.directory);
+    assert.equal(retainedSnapshot.metadata.state, "retained");
+    assert.equal(retainedSnapshot.retentionDeadline, fakeNow + uploadLifetime.snapshotRetentionMs);
+    assert.deepEqual(retentionLimits, {
+      contentBatchTimeoutMs: uploadLifetime.contentBatchTimeoutMs,
+      cliApplyTimeoutMs: uploadLifetime.cliApplyTimeoutMs,
+      retentionMs: uploadLifetime.snapshotRetentionMs,
+      safetyMarginMs: uploadLifetime.snapshotSafetyMarginMs
+    });
+    const inspected = await inspectPrivateSnapshot(retainedSnapshot.directory, { rootPath: retainedSnapshot.root });
+    assert.equal(inspected.metadata.state, "retained");
+    assert.equal(await readFile(retainedSnapshot.actionableFiles[0].absolutePath, "utf8"), "selected before the queue timeout");
+
+    let cleanerNow = retainedSnapshot.retentionDeadline - retentionLimits.retentionMs;
+    let cleanerDelay = null;
+    await cleanSnapshotAtDeadline({
+      directory: retainedSnapshot.directory,
+      nonce: retainedSnapshot.nonce,
+      retentionDeadline: retainedSnapshot.retentionDeadline
+    }, {
+      now: () => cleanerNow,
+      wait: async (delayMs) => {
+        cleanerDelay = delayMs;
+        cleanerNow += delayMs;
+      }
+    });
+    assert.equal(cleanerDelay, retentionLimits.retentionMs);
+    assert.ok(cleanerDelay <= uploadLifetime.snapshotCleanerMaxDelayMs);
+    await assert.rejects(readFile(retainedSnapshot.actionableFiles[0].absolutePath), (error) => error?.code === "ENOENT");
+  } finally {
+    if (retainedSnapshot?.directory) {
+      await removePrivateSnapshot(retainedSnapshot.directory, {
+        rootPath: retainedSnapshot.root,
+        expectedNonce: retainedSnapshot.nonce,
+        expectedDeadline: retainedSnapshot.retentionDeadline
+      }).catch(() => {});
+    }
+    await rm(temp, { recursive: true, force: true });
+  }
+});
+
 test("apply-upload completes as a consumed no-op when every filename is already staged", { concurrency: false }, async () => {
   const temp = await mkdtemp(join(tmpdir(), "teal-upload-noop-"));
   try {
@@ -696,7 +824,7 @@ test("incomplete terminal upload result is indeterminate and supplies safe resul
   }
 });
 
-test("pre-0.9.6 upload tokens are rejected before transfer", { concurrency: false }, async () => {
+test("pre-schema-v2 upload tokens are rejected before transfer", { concurrency: false }, async () => {
   const temp = await mkdtemp(join(tmpdir(), "teal-upload-old-token-"));
   try {
     const path = join(temp, "old.txt");
@@ -708,7 +836,7 @@ test("pre-0.9.6 upload tokens are rejected before transfer", { concurrency: fals
     const statePath = join(temp, "tokens.json");
     await writeFile(statePath, JSON.stringify({ version: 1, tokens: { [token]: record } }), "utf8");
     const client = directClient({ inventory: [] });
-    await assert.rejects(() => applyPlan({ command: "apply-upload", operands: [token], issueIdentifier: "TAB-TEST", statePath }, client, 9), /predates 0\.9\.6/u);
+    await assert.rejects(() => applyPlan({ command: "apply-upload", operands: [token], issueIdentifier: "TAB-TEST", statePath }, client, 9), /predates upload token schema v2/u);
     assert.deepEqual(client.calls, []);
   } finally {
     await rm(temp, { recursive: true, force: true });
